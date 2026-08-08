@@ -1,0 +1,381 @@
+# Complete example: three inverters and one grid meter on a shared RS485 bus,
+# with the self-consumption controller enabled.
+#
+# The three inverters are deliberately different, to show how the component
+# copes with mixed hardware:
+#   inverter1  three phase, grid tie, reports line voltages
+#   inverter2  three phase, storage with battery and UPS
+#   inverter3  single phase, grid tie, wired to L2
+#
+# Only a useful subset of the available sensors is declared here. Adding a
+# sensor is what makes it appear; leaving it out costs nothing.
+
+esphome:
+  name: growatt-master
+  friendly_name: Growatt Master
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: github://adydeac/esphome-growatt-master
+    components: [ growatt_master ]
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+ota:
+  - platform: esphome
+logger:
+  level: INFO
+  logs:
+    growatt_master: INFO
+    growatt_inverter: INFO
+    growatt_meter: INFO
+
+web_server:
+  port: 80
+  version: 3
+
+
+# ---------------------------------------------------------------------------
+# Bus
+#
+# turnaround_time applies to every transaction regardless of size and dominates
+# the budget when several devices share a bus. 50 ms is comfortable and still
+# far above the 3.5 character silence the standard requires.
+# ---------------------------------------------------------------------------
+
+uart:
+  - id: uart_growatt
+    tx_pin: GPIO16
+    rx_pin: GPIO17
+    baud_rate: 9600
+    stop_bits: 1
+    rx_buffer_size: 512
+
+modbus:
+  - id: modbus_growatt
+    uart_id: uart_growatt
+    role: client
+    send_wait_time: 400ms
+    turnaround_time: 50ms
+
+
+# Contactor telling the component whether the mains is connected. Without one
+# the grid is assumed to always be available.
+binary_sensor:
+  - platform: gpio
+    id: grid_power_sensor
+    name: "Grid Power Sensor"
+    device_class: power
+    pin:
+      number: GPIO14
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+
+
+growatt_master:
+  id: master
+  modbus_id: modbus_growatt
+  max_inverters: 8
+
+  # The hub evaluates aggregates and conditions at this rate; the controller
+  # acts at step_interval, rounded up to a multiple of it.
+  update_interval: 2s
+  step_interval: 6s
+
+  grid_power_sensor_id: grid_power_sensor
+  average_samples: 60
+  meter_stalled_timeout: 10s
+  meter_offline_timeout: 20s
+
+  # ---- controller tuning ----
+  # Gains are asymmetric on purpose: overshooting upwards means exporting,
+  # which costs money, while overshooting downwards only means importing a
+  # little longer.
+  import_threshold: 100       # W before production is raised
+  export_threshold: 0         # W before production is cut
+  increase_gain: 0.5
+  decrease_gain: 0.8
+  min_step: 1                 # %
+  max_step: 20                # %
+  startup_power_rate: 0       # every inverter starts here after a reboot
+  offgrid_power_rate: 100     # used while the mains is absent
+  refresh_interval: 60s
+
+  # How far outside the controller's window each inverter's own trip
+  # thresholds are pushed, so there is room to react before the hardware
+  # disconnects and locks us out for minutes.
+  inverter_protection_margin: 10   # %
+  inverter_restart_delay: 30       # s
+
+  # ---- thresholds, editable at runtime and kept across reboots ----
+  grid_phase_voltage_low: {name: "Grid Phase Voltage Low"}
+  grid_phase_voltage_high: {name: "Grid Phase Voltage High"}
+  grid_line_voltage_low: {name: "Grid Line Voltage Low"}
+  grid_line_voltage_high: {name: "Grid Line Voltage High"}
+  grid_export_limit: {name: "Grid Export Limit"}
+  ups_max_load: {name: "UPS Max Load"}
+  ups_max_load_avg: {name: "UPS Max Load Average"}
+  battery_soc_min: {name: "Battery SOC Min"}
+  battery_soc_max: {name: "Battery SOC Max"}
+
+  # ---- aggregates ----
+  # Import and export are summed separately across phases: with no netting at
+  # the meter, +500 W on L1 and -300 W on L2 is billed as 500 W drawn and
+  # 300 W given away, not 200 W net.
+  meter_import: {name: "Grid Import"}
+  meter_export: {name: "Grid Export"}
+  meter_import_average: {name: "Grid Import Average"}
+  meter_export_average: {name: "Grid Export Average"}
+  meter_state: {name: "Meter State"}
+  controller_state: {name: "Controller State"}
+
+  # ---- derived conditions, for grid switching logic written in YAML ----
+  grid_power: {name: "Grid Power"}
+  grid_over_voltage: {name: "Grid Over Voltage"}
+  grid_under_voltage: {name: "Grid Under Voltage"}
+  ups_overloaded: {name: "UPS Overloaded"}
+  ups_overloaded_average: {name: "UPS Overloaded Average"}
+  battery_below_min: {name: "Battery Below Min"}
+  battery_above_max: {name: "Battery Above Max"}
+
+  inverters:
+    # -----------------------------------------------------------------------
+    # Three phase grid tie. This model reports 230 V phase voltages but wants
+    # its protection registers written in 400 V line terms, which "auto"
+    # detects from the populated line to line registers.
+    # -----------------------------------------------------------------------
+    - id: inverter1
+      address: 11
+      update_interval: 6s
+      slow_update_interval: 40s
+      protect_eeprom: true
+      auto_protection_limits: true
+      voltage_convention: auto
+
+      info: {name: "Inverter 1 Info"}
+      model: {name: "Inverter 1 Model"}
+      serial_number: {name: "Inverter 1 Serial"}
+      firmware: {name: "Inverter 1 Firmware"}
+      normal_power: {name: "Inverter 1 Rated Power"}
+
+      status: {name: "Inverter 1 Status"}
+      fault: {name: "Inverter 1 Fault"}
+      derating: {name: "Inverter 1 Derating"}
+
+      pv_active_power: {name: "Inverter 1 PV Power"}
+      grid_active_power: {name: "Inverter 1 Grid Power"}
+      frequency: {name: "Inverter 1 Frequency"}
+      energy_today: {name: "Inverter 1 Energy Today"}
+      energy_total: {name: "Inverter 1 Energy Total"}
+      temperature: {name: "Inverter 1 Temperature"}
+
+      phase_a:
+        voltage: {name: "Inverter 1 L1 Voltage"}
+        current: {name: "Inverter 1 L1 Current"}
+        active_power: {name: "Inverter 1 L1 Power"}
+      phase_b:
+        voltage: {name: "Inverter 1 L2 Voltage"}
+        current: {name: "Inverter 1 L2 Current"}
+        active_power: {name: "Inverter 1 L2 Power"}
+      phase_c:
+        voltage: {name: "Inverter 1 L3 Voltage"}
+        current: {name: "Inverter 1 L3 Current"}
+        active_power: {name: "Inverter 1 L3 Power"}
+
+      line_voltage_ab: {name: "Inverter 1 L1-L2 Voltage"}
+      line_voltage_bc: {name: "Inverter 1 L2-L3 Voltage"}
+      line_voltage_ca: {name: "Inverter 1 L3-L1 Voltage"}
+
+      pv1:
+        voltage: {name: "Inverter 1 PV1 Voltage"}
+        active_power: {name: "Inverter 1 PV1 Power"}
+      pv2:
+        voltage: {name: "Inverter 1 PV2 Voltage"}
+        active_power: {name: "Inverter 1 PV2 Power"}
+
+      active_power_rate: {name: "Inverter 1 Power Rate"}
+      grid_voltage_low: {name: "Inverter 1 Grid Voltage Low"}
+      grid_voltage_high: {name: "Inverter 1 Grid Voltage High"}
+      restart_delay: {name: "Inverter 1 Restart Delay"}
+
+      refresh: {name: "Inverter 1 Refresh"}
+      dump_registers: {name: "Inverter 1 Dump Registers"}
+      setting_memory:
+        name: "Inverter 1 Setting Memory"
+        restore_mode: ALWAYS_OFF
+
+    # -----------------------------------------------------------------------
+    # Three phase storage inverter with battery and UPS output. Capabilities
+    # are detected, so nothing needs declaring for them.
+    # -----------------------------------------------------------------------
+    - id: inverter2
+      address: 12
+      update_interval: 6s
+      slow_update_interval: 40s
+      protect_eeprom: true
+      auto_protection_limits: true
+      voltage_convention: phase
+
+      # Battery pack geometry, used only by the derived calculations.
+      # Defaults match Growatt ARK 2.5 modules.
+      battery_module_voltage: 53.75
+      battery_module_capacity: 2.5
+      battery_discharge_hours: 2.5
+
+      info: {name: "Inverter 2 Info"}
+      serial_number: {name: "Inverter 2 Serial"}
+      normal_power: {name: "Inverter 2 Rated Power"}
+
+      status: {name: "Inverter 2 Status"}
+      fault: {name: "Inverter 2 Fault"}
+      derating: {name: "Inverter 2 Derating"}
+
+      pv_active_power: {name: "Inverter 2 PV Power"}
+      grid_active_power: {name: "Inverter 2 Grid Power"}
+      energy_today: {name: "Inverter 2 Energy Today"}
+      energy_total: {name: "Inverter 2 Energy Total"}
+
+      phase_a:
+        voltage: {name: "Inverter 2 L1 Voltage"}
+        active_power: {name: "Inverter 2 L1 Power"}
+      phase_b:
+        voltage: {name: "Inverter 2 L2 Voltage"}
+        active_power: {name: "Inverter 2 L2 Power"}
+      phase_c:
+        voltage: {name: "Inverter 2 L3 Voltage"}
+        active_power: {name: "Inverter 2 L3 Power"}
+
+      # ---- storage only ----
+      battery_voltage: {name: "Inverter 2 Battery Voltage"}
+      battery_soc: {name: "Inverter 2 Battery SOC"}
+      battery_charge_power: {name: "Inverter 2 Battery Charge Power"}
+      battery_discharge_power: {name: "Inverter 2 Battery Discharge Power"}
+      battery_health: {name: "Inverter 2 Battery Health"}
+      battery_modules: {name: "Inverter 2 Battery Modules"}
+      charge_energy_today: {name: "Inverter 2 Charge Energy Today"}
+      discharge_energy_today: {name: "Inverter 2 Discharge Energy Today"}
+
+      ups_enable: {name: "Inverter 2 UPS"}
+      ups_load: {name: "Inverter 2 UPS Load"}
+      ups_load_average: {name: "Inverter 2 UPS Load Average"}
+      ups_total_power: {name: "Inverter 2 UPS Total Power"}
+      ups_frequency: {name: "Inverter 2 UPS Frequency"}
+
+      ac_charge: {name: "Inverter 2 AC Charge"}
+      battery_type_select: {name: "Inverter 2 Battery Type"}
+      grid_first_discharge_rate: {name: "Inverter 2 Grid First Discharge Rate"}
+      grid_first_stop_soc: {name: "Inverter 2 Grid First Stop SOC"}
+      battery_first_charge_rate: {name: "Inverter 2 Battery First Charge Rate"}
+      battery_first_stop_soc: {name: "Inverter 2 Battery First Stop SOC"}
+
+      # Time windows reach the inverter only when Apply is pressed, as one
+      # atomic block. Windows may wrap past midnight.
+      grid_first:
+        apply: {name: "Inverter 2 Grid First Apply"}
+        period1:
+          start_hour: {name: "Inverter 2 GF P1 Start Hour"}
+          start_minute: {name: "Inverter 2 GF P1 Start Minute"}
+          stop_hour: {name: "Inverter 2 GF P1 Stop Hour"}
+          stop_minute: {name: "Inverter 2 GF P1 Stop Minute"}
+          enabled: {name: "Inverter 2 GF P1 Enabled"}
+
+      battery_first:
+        apply: {name: "Inverter 2 Battery First Apply"}
+        period1:
+          start_hour: {name: "Inverter 2 BF P1 Start Hour"}
+          start_minute: {name: "Inverter 2 BF P1 Start Minute"}
+          stop_hour: {name: "Inverter 2 BF P1 Stop Hour"}
+          stop_minute: {name: "Inverter 2 BF P1 Stop Minute"}
+          enabled: {name: "Inverter 2 BF P1 Enabled"}
+
+      active_power_rate: {name: "Inverter 2 Power Rate"}
+      refresh: {name: "Inverter 2 Refresh"}
+      dump_registers: {name: "Inverter 2 Dump Registers"}
+
+    # -----------------------------------------------------------------------
+    # Single phase grid tie. The controller needs to know which mains phase it
+    # feeds; the inverter cannot tell us, because it only ever sees one
+    # voltage. Declared last, so it is the first to give way when export has
+    # to be cut.
+    # -----------------------------------------------------------------------
+    - id: inverter3
+      address: 13
+      update_interval: 6s
+      slow_update_interval: 40s
+      protect_eeprom: true
+      auto_protection_limits: true
+      voltage_convention: phase
+
+      phase: {name: "Inverter 3 Phase"}
+
+      info: {name: "Inverter 3 Info"}
+      model: {name: "Inverter 3 Model"}
+      serial_number: {name: "Inverter 3 Serial"}
+      normal_power: {name: "Inverter 3 Rated Power"}
+
+      status: {name: "Inverter 3 Status"}
+      fault: {name: "Inverter 3 Fault"}
+      derating: {name: "Inverter 3 Derating"}
+
+      pv_active_power: {name: "Inverter 3 PV Power"}
+      grid_active_power: {name: "Inverter 3 Grid Power"}
+      energy_today: {name: "Inverter 3 Energy Today"}
+      energy_total: {name: "Inverter 3 Energy Total"}
+
+      phase_a:
+        voltage: {name: "Inverter 3 Voltage"}
+        current: {name: "Inverter 3 Current"}
+        active_power: {name: "Inverter 3 Power"}
+
+      pv1:
+        voltage: {name: "Inverter 3 PV1 Voltage"}
+        active_power: {name: "Inverter 3 PV1 Power"}
+      pv2:
+        voltage: {name: "Inverter 3 PV2 Voltage"}
+        active_power: {name: "Inverter 3 PV2 Power"}
+
+      active_power_rate: {name: "Inverter 3 Power Rate"}
+      refresh: {name: "Inverter 3 Refresh"}
+      dump_registers: {name: "Inverter 3 Dump Registers"}
+
+  # -------------------------------------------------------------------------
+  # The first meter is the grid reference: the controller takes its phase
+  # powers and voltages from here.
+  # -------------------------------------------------------------------------
+  meters:
+    - id: grid_meter
+      address: 2
+      update_interval: 2s
+      slow_update_interval: 30s
+      model_select: {name: "Grid Meter Model"}
+      info: {name: "Grid Meter Info"}
+
+      phase_a:
+        voltage: {name: "Grid L1 Voltage"}
+        current: {name: "Grid L1 Current"}
+        active_power: {name: "Grid L1 Power"}
+        power_factor: {name: "Grid L1 Power Factor"}
+      phase_b:
+        voltage: {name: "Grid L2 Voltage"}
+        current: {name: "Grid L2 Current"}
+        active_power: {name: "Grid L2 Power"}
+        power_factor: {name: "Grid L2 Power Factor"}
+      phase_c:
+        voltage: {name: "Grid L3 Voltage"}
+        current: {name: "Grid L3 Current"}
+        active_power: {name: "Grid L3 Power"}
+        power_factor: {name: "Grid L3 Power Factor"}
+
+      total_active_power: {name: "Grid Total Power"}
+      frequency: {name: "Grid Frequency"}
+      import_active_energy: {name: "Grid Import Energy"}
+      export_active_energy: {name: "Grid Export Energy"}
