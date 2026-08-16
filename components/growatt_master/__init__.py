@@ -947,7 +947,7 @@ async def to_code(config):
             CONF_INVERTERS_MODBUS_ID,
             (CONF_ADDR_FROM, CONF_ADDR_TO, CONF_ADDR_CHANGE, CONF_ADDR_STATUS),
             "inverter",
-            "GROWATT_COM_ADDRESS",
+            0x001E,  # Growatt: holding 30, plain integer, function 6
             False,
         ),
         (
@@ -955,7 +955,7 @@ async def to_code(config):
             CONF_METERS_MODBUS_ID,
             (CONF_MADDR_FROM, CONF_MADDR_TO, CONF_MADDR_CHANGE, CONF_MADDR_STATUS),
             "meter",
-            "EASTRON_COM_ADDRESS",
+            0x0014,  # Eastron: holding 20-21, float32, function 16
             True,
         ),
     ):
@@ -972,7 +972,10 @@ async def to_code(config):
             },
         )
         cg.add(tool.set_label(label))
-        cg.add(tool.set_address_register(cg.RawExpression(reg)))
+        # A literal, not the C++ constant: generated code runs in the global
+        # setup(), where an unqualified name from the component namespace is
+        # not visible.
+        cg.add(tool.set_address_register(reg))
         cg.add(tool.set_float_format(is_float))
         for key, is_target in ((from_key, False), (to_key, True)):
             if key in config:

@@ -33,8 +33,11 @@ class GrowattMeter;
 // Eastron holds it as a float32 spanning holding 20-21 and only accepts
 // function 16, and rejects any request for an odd number of registers - which
 // is why the probe length is part of the profile rather than a constant.
-static const uint16_t GROWATT_COM_ADDRESS = 30;
-static const uint16_t EASTRON_COM_ADDRESS = 0x0014;
+// Kept in step by hand with the literals in __init__.py, which is where the
+// tools are configured: generated code runs in the global setup(), where these
+// names are not visible without their namespace.
+static const uint16_t GROWATT_COM_ADDRESS = 0x001E;   // holding 30
+static const uint16_t EASTRON_COM_ADDRESS = 0x0014;   // holding 20-21
 
 enum AddrToolStep : uint8_t {
   ADDR_IDLE = 0,
