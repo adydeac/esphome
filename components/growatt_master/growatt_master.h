@@ -51,6 +51,9 @@ enum AddrToolStep : uint8_t {
 // hub spanning two of them cannot be the tool itself - it owns them instead.
 class GrowattAddressTool : public Component, public modbus::ModbusClientDevice {
  public:
+  void loop() override;
+  void on_modbus_data(const std::vector<uint8_t> &data) override;
+  void on_modbus_error(uint8_t function_code, uint8_t exception_code) override;
   float get_setup_priority() const override { return setup_priority::DATA - 2; }
 
   void set_from(uint8_t a) { this->from_ = a; }
