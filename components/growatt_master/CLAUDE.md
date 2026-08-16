@@ -247,17 +247,41 @@ least one of their sensors is declared in YAML**: line to line voltages at
 The identification block at holding 0xFC00-0xFC03 is read, logged and shown raw.
 No documented mapping was available, so nothing is inferred from it.
 
-## Commissioning and the address tool
+## One bus or two
 
-The hub carries a bus level address changer - a button, a "from" and a "to"
-number, and a status text sensor - that is deliberately unrelated to the
-inverters declared in the configuration. Its whole purpose is the unit that is
-not in the configuration yet, or one sitting on an address that clashes.
+`modbus_id` on its own keeps everything on one bus, exactly as before.
+`inverters_modbus_id` and `meters_modbus_id` split them, and either can be given
+alone with the other falling back to `modbus_id`. Any single device can override
+its type's bus with its own `modbus_id`.
 
-To make that possible the hub is itself a `ModbusClientDevice`, registered at
-address 0. Being the broadcast address, 0 never matches an incoming frame, so
-the hub stays inert until the tool points it at a real address and returns it
-to 0 when finished.
+Splitting is worth it because the meter feeds every control cycle while the
+inverters are read on a slower schedule, and because a mute device stalls the
+whole bus for the duration of its timeouts - which was observed making a silent
+meter slow down healthy inverters. Two buses also let a meter and an inverter
+share an address without conflict, which simplifies commissioning.
+
+What it costs: a second transceiver and UART, and the loss of a property that
+comes free with one bus - a single broken cable stops everything and is obvious,
+whereas half a system can run for days unnoticed.
+
+## Commissioning and the address tools
+
+There is a bus level address changer - a button, a "from" and a "to" number, and
+a status text sensor - deliberately unrelated to the devices declared in the
+configuration. Its whole purpose is the unit that is not in the configuration
+yet, or one sitting on an address that clashes.
+
+`GrowattAddressTool` is a `ModbusClientDevice` in its own right, registered at
+address 0. Being the broadcast address, 0 never matches an incoming frame, so it
+stays inert until it points itself at a real address and returns to 0 when
+finished. There is one instance per bus, because a `ModbusClientDevice` belongs
+to exactly one bus and a hub spanning two of them cannot be the tool itself.
+
+The two families differ in three ways at once, which is why the profile is
+configured rather than assumed: Growatt keeps its address as a plain integer at
+holding 30 and takes function 6, while Eastron keeps it as a float32 across
+holding 20-21, accepts only function 16, and rejects any request for an odd
+number of registers. The probe reads two registers for that last reason.
 
 Before writing, the target address is probed with function 3 at register 0,
 about the most universal question there is: a device that implements it answers

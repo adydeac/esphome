@@ -4,6 +4,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include <cmath>
+#include <cstring>
 
 namespace esphome {
 namespace growatt_master {
@@ -59,86 +60,100 @@ void GrowattHub::publish_settings_() {
   }
 }
 
-// ------------------------- address change tool -------------------------
+// ========================= GrowattAddressTool =========================
 
 // Silence is the only evidence an address is free, and a single missed frame
 // would fake it, so the probe is repeated before the address is declared empty.
 static const uint32_t ADDR_TIMEOUT_MS = 1000;
 static const uint8_t ADDR_PROBE_TRIES = 3;
 
-void GrowattHub::start_address_change() {
-  if (this->addr_step_ != ADDR_IDLE) {
-    ESP_LOGW(TAG, "address change: already running");
+void GrowattAddressTool::start() {
+  if (this->step_ != ADDR_IDLE) {
+    ESP_LOGW(TAG, "%s address change: already running", this->label_);
     return;
   }
   // Both default to 0, which is the Modbus broadcast address and therefore
   // never a real device. An unset field means the button was pressed by
   // accident, so nothing happens at all.
-  if (this->addr_from_ == 0 || this->addr_to_ == 0) {
-    ESP_LOGW(TAG, "address change: 'from' and 'to' must both be set, ignoring");
+  if (this->from_ == 0 || this->to_ == 0) {
+    ESP_LOGW(TAG, "%s address change: 'from' and 'to' must both be set, ignoring",
+             this->label_);
     return;
   }
-  if (this->addr_from_ == this->addr_to_) {
-    ESP_LOGW(TAG, "address change: %u to itself, ignoring", this->addr_to_);
+  if (this->from_ == this->to_) {
+    ESP_LOGW(TAG, "%s address change: %u to itself, ignoring", this->label_,
+             this->to_);
     return;
   }
 
-  ESP_LOGI(TAG, "address change: checking whether %u is free...",
-           this->addr_to_);
-  if (this->addr_status_ != nullptr)
-    this->addr_status_->publish_state("CHECKING");
-  this->addr_step_ = ADDR_PROBE;
-  this->addr_tries_ = 0;
-  this->addr_waiting_ = false;
+  ESP_LOGI(TAG, "%s address change: checking whether %u is free...", this->label_,
+           this->to_);
+  if (this->status_ != nullptr)
+    this->status_->publish_state("CHECKING");
+  this->step_ = ADDR_PROBE;
+  this->tries_ = 0;
+  this->waiting_ = false;
 }
 
-void GrowattHub::addr_send_() {
-  if (this->addr_step_ == ADDR_PROBE) {
+void GrowattAddressTool::send_() {
+  if (this->step_ == ADDR_PROBE) {
     // Function 3 at register 0 is about the most universal question there is:
     // a device that implements it answers with data, one that does not answers
     // with an exception. Either way it has revealed itself, which is all the
-    // probe needs to know.
-    this->address_ = this->addr_to_;
-    this->send(CMD_READ_HOLDING, 0, 1);
+    // probe needs to know. Two registers rather than one, because Eastron
+    // rejects any request for an odd number and Growatt does not mind.
+    this->address_ = this->to_;
+    this->send(CMD_READ_HOLDING, 0, 2);
   } else {
-    this->address_ = this->addr_from_;
-    const uint8_t payload[2] = {0, this->addr_to_};
-    this->send(CMD_WRITE_SINGLE, HUB_COM_ADDRESS, 1, 2, payload);
+    this->address_ = this->from_;
+    if (this->float_format_) {
+      // Eastron keeps the address as a float32 across two registers and only
+      // accepts function 16.
+      float v = (float) this->to_;
+      uint32_t bits;
+      memcpy(&bits, &v, sizeof(bits));
+      const uint8_t payload[4] = {(uint8_t) (bits >> 24), (uint8_t) (bits >> 16),
+                                  (uint8_t) (bits >> 8), (uint8_t) bits};
+      this->send(CMD_WRITE_MULTI, this->addr_reg_, 2, 4, payload);
+    } else {
+      const uint8_t payload[2] = {0, this->to_};
+      this->send(CMD_WRITE_SINGLE, this->addr_reg_, 1, 2, payload);
+    }
   }
-  this->addr_sent_ = millis();
-  this->addr_waiting_ = true;
+  this->sent_ = millis();
+  this->waiting_ = true;
 }
 
-void GrowattHub::addr_finish_(const char *status, bool ok) {
+void GrowattAddressTool::finish_(const char *status, bool ok) {
   if (ok)
-    ESP_LOGI(TAG, "address change: %s", status);
+    ESP_LOGI(TAG, "%s address change: %s", this->label_, status);
   else
-    ESP_LOGE(TAG, "address change: %s", status);
-  if (this->addr_status_ != nullptr)
-    this->addr_status_->publish_state(status);
-  this->addr_step_ = ADDR_IDLE;
-  this->addr_waiting_ = false;
+    ESP_LOGE(TAG, "%s address change: %s", this->label_, status);
+  if (this->status_ != nullptr)
+    this->status_->publish_state(status);
+  this->step_ = ADDR_IDLE;
+  this->waiting_ = false;
   this->address_ = 0;  // stop matching anything on the bus
 }
 
-void GrowattHub::loop() {
-  if (this->addr_step_ == ADDR_IDLE)
+void GrowattAddressTool::loop() {
+  if (this->step_ == ADDR_IDLE)
     return;
 
-  if (this->addr_waiting_) {
-    if (millis() - this->addr_sent_ < ADDR_TIMEOUT_MS)
+  if (this->waiting_) {
+    if (millis() - this->sent_ < ADDR_TIMEOUT_MS)
       return;
-    this->addr_waiting_ = false;
+    this->waiting_ = false;
 
-    if (this->addr_step_ == ADDR_PROBE) {
-      if (++this->addr_tries_ < ADDR_PROBE_TRIES) {
-        ESP_LOGD(TAG, "address change: no answer at %u (%u/%u)", this->addr_to_,
-                 this->addr_tries_, ADDR_PROBE_TRIES);
+    if (this->step_ == ADDR_PROBE) {
+      if (++this->tries_ < ADDR_PROBE_TRIES) {
+        ESP_LOGD(TAG, "%s address change: no answer at %u (%u/%u)", this->label_,
+                 this->to_, this->tries_, ADDR_PROBE_TRIES);
         return;  // sent again below on the next pass
       }
-      ESP_LOGI(TAG, "address change: %u is free, writing %u -> %u",
-               this->addr_to_, this->addr_from_, this->addr_to_);
-      this->addr_step_ = ADDR_WRITE;
+      ESP_LOGI(TAG, "%s address change: %u is free, writing %u -> %u",
+               this->label_, this->to_, this->from_, this->to_);
+      this->step_ = ADDR_WRITE;
       return;
     }
 
@@ -146,47 +161,51 @@ void GrowattHub::loop() {
     // adopted the new address before replying, in which case the answer came
     // from an address we were not listening on. Reported as FAILED because that
     // is what we can prove, but check the new address before assuming the worst.
-    this->addr_finish_(
-        "FAILED", false);
+    uint8_t from = this->from_, to = this->to_;
+    const char *label = this->label_;
+    this->finish_("FAILED", false);
     ESP_LOGW(TAG,
-             "address change: no echo from %u. The write may still have taken "
-             "effect - a unit that switches before replying answers from %u, "
-             "which we were not listening on. Check both addresses.",
-             this->addr_from_, this->addr_to_);
+             "%s address change: no echo from %u. The write may still have "
+             "taken effect - a unit that switches before replying answers from "
+             "%u, which we were not listening on. Check both addresses.",
+             label, from, to);
     return;
   }
 
   if (!this->ready_for_immediate_send())
     return;
-  this->addr_send_();
+  this->send_();
 }
 
-void GrowattHub::on_modbus_data(const std::vector<uint8_t> &data) {
-  if (this->addr_step_ == ADDR_IDLE || !this->addr_waiting_)
+void GrowattAddressTool::on_modbus_data(const std::vector<uint8_t> &data) {
+  if (this->step_ == ADDR_IDLE || !this->waiting_)
     return;
-  this->addr_waiting_ = false;
-  if (this->addr_step_ == ADDR_PROBE) {
-    this->addr_finish_("NEW ADDRESS IS IN USE", false);
+  this->waiting_ = false;
+  if (this->step_ == ADDR_PROBE) {
+    this->finish_("NEW ADDRESS IS IN USE", false);
     return;
   }
-  this->addr_finish_("OK", true);
+  this->finish_("OK", true);
 }
 
-void GrowattHub::on_modbus_error(uint8_t function_code, uint8_t exception_code) {
-  if (this->addr_step_ == ADDR_IDLE || !this->addr_waiting_)
+void GrowattAddressTool::on_modbus_error(uint8_t function_code,
+                                         uint8_t exception_code) {
+  if (this->step_ == ADDR_IDLE || !this->waiting_)
     return;
-  this->addr_waiting_ = false;
-  if (this->addr_step_ == ADDR_PROBE) {
+  this->waiting_ = false;
+  if (this->step_ == ADDR_PROBE) {
     // An exception is still an answer, and an answer means something is there.
-    ESP_LOGI(TAG, "address change: exception %u from %u - the address is taken",
-             exception_code, this->addr_to_);
-    this->addr_finish_("NEW ADDRESS IS IN USE", false);
+    ESP_LOGI(TAG, "%s address change: exception %u from %u - the address is taken",
+             this->label_, exception_code, this->to_);
+    this->finish_("NEW ADDRESS IS IN USE", false);
     return;
   }
-  ESP_LOGE(TAG, "address change: exception %u on function 0x%02X",
-           exception_code, function_code);
-  this->addr_finish_("FAILED", false);
+  ESP_LOGE(TAG, "%s address change: exception %u on function 0x%02X",
+           this->label_, exception_code, function_code);
+  this->finish_("FAILED", false);
 }
+
+// ============================== GrowattHub ==============================
 
 bool GrowattHub::grid_available() const {
   // No contactor sensor declared means we have no way of telling, and assuming

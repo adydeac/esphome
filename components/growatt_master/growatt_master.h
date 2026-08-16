@@ -28,17 +28,54 @@ static const float TWO_DEC = 0.01f;
 class GrowattInverter;
 class GrowattMeter;
 
-// Address of the inverter's own Modbus address setting.
-static const uint16_t HUB_COM_ADDRESS = 30;
+// Where each family keeps its own Modbus address, and how it has to be written.
+// Growatt holds it as a plain integer at holding 30 and takes function 6.
+// Eastron holds it as a float32 spanning holding 20-21 and only accepts
+// function 16, and rejects any request for an odd number of registers - which
+// is why the probe length is part of the profile rather than a constant.
+static const uint16_t GROWATT_COM_ADDRESS = 30;
+static const uint16_t EASTRON_COM_ADDRESS = 0x0014;
 
-// Bus level address change tool. It is deliberately unrelated to the inverters
-// declared in the configuration: its whole purpose is commissioning a unit that
-// is not in the configuration yet, or moving one off a clashing address before
-// it can be declared at all.
 enum AddrToolStep : uint8_t {
   ADDR_IDLE = 0,
   ADDR_PROBE,   // is anything already answering at the target address?
   ADDR_WRITE,
+};
+
+// Bus level address change tool. Deliberately unrelated to the devices declared
+// in the configuration: its whole purpose is commissioning a unit that is not
+// in the configuration yet, or moving one off a clashing address before it can
+// be declared at all.
+//
+// One instance per bus. A ModbusClientDevice belongs to exactly one bus, so a
+// hub spanning two of them cannot be the tool itself - it owns them instead.
+class GrowattAddressTool : public Component, public modbus::ModbusClientDevice {
+ public:
+  float get_setup_priority() const override { return setup_priority::DATA - 2; }
+
+  void set_from(uint8_t a) { this->from_ = a; }
+  void set_to(uint8_t a) { this->to_ = a; }
+  void set_status(text_sensor::TextSensor *ts) { this->status_ = ts; }
+  void set_label(const char *l) { this->label_ = l; }
+  // Device family profile, set from the configuration.
+  void set_address_register(uint16_t r) { this->addr_reg_ = r; }
+  void set_float_format(bool f) { this->float_format_ = f; }
+  void start();
+
+ protected:
+  void send_();
+  void finish_(const char *status, bool ok);
+
+  AddrToolStep step_{ADDR_IDLE};
+  uint8_t from_{0};
+  uint8_t to_{0};
+  uint8_t tries_{0};
+  uint32_t sent_{0};
+  bool waiting_{false};
+  uint16_t addr_reg_{GROWATT_COM_ADDRESS};
+  bool float_format_{false};
+  const char *label_{"device"};
+  text_sensor::TextSensor *status_{nullptr};
 };
 
 // Editable thresholds owned by the hub. They are the single place where a
@@ -73,13 +110,10 @@ static const uint8_t HUB_AVG_MAX = 60;
 
 // Owns the inverters and meters sharing one Modbus bus. Inverter order is
 // significant: it is the priority order used by the power controller.
-class GrowattHub : public PollingComponent, public modbus::ModbusClientDevice {
+class GrowattHub : public PollingComponent {
  public:
   void setup() override;
   void update() override;
-  void loop() override;
-  void on_modbus_data(const std::vector<uint8_t> &data) override;
-  void on_modbus_error(uint8_t function_code, uint8_t exception_code) override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA - 1; }
 
@@ -125,12 +159,6 @@ class GrowattHub : public PollingComponent, public modbus::ModbusClientDevice {
   void set_avg_window(uint8_t n) {
     this->avg_window_ = (n == 0 || n > HUB_AVG_MAX) ? HUB_AVG_MAX : n;
   }
-
-  // ------------------------- address change tool -------------------------
-  void set_addr_from(uint8_t a) { this->addr_from_ = a; }
-  void set_addr_to(uint8_t a) { this->addr_to_ = a; }
-  void set_addr_status(text_sensor::TextSensor *ts) { this->addr_status_ = ts; }
-  void start_address_change();
 
   uint8_t meter_health() const { return this->health_; }
   float get_import() const { return this->import_w_; }
@@ -210,19 +238,7 @@ class GrowattHub : public PollingComponent, public modbus::ModbusClientDevice {
   float step_for_(GrowattInverter *inv, float power_w, float gain);
   void set_ctrl_state_(const char *s);
 
-  void addr_send_();
-  void addr_finish_(const char *status, bool ok);
-
   ESPPreferenceObject pref_;
-
-  // address change tool
-  AddrToolStep addr_step_{ADDR_IDLE};
-  uint8_t addr_from_{0};
-  uint8_t addr_to_{0};
-  uint8_t addr_tries_{0};
-  uint32_t addr_sent_{0};
-  bool addr_waiting_{false};
-  text_sensor::TextSensor *addr_status_{nullptr};
 
   uint8_t max_inverters_{1};
   std::vector<GrowattInverter *> inverters_;
@@ -307,7 +323,7 @@ class GrowattHubNumber : public number::Number {
 // address that no slave ever answers to, so a stray press does nothing.
 class GrowattAddressNumber : public number::Number {
  public:
-  void set_parent(GrowattHub *p) { this->parent_ = p; }
+  void set_parent(GrowattAddressTool *p) { this->parent_ = p; }
   void set_is_target(bool t) { this->is_target_ = t; }
 
  protected:
@@ -317,24 +333,24 @@ class GrowattAddressNumber : public number::Number {
       return;
     uint8_t a = (uint8_t) lroundf(value);
     if (this->is_target_)
-      this->parent_->set_addr_to(a);
+      this->parent_->set_to(a);
     else
-      this->parent_->set_addr_from(a);
+      this->parent_->set_from(a);
   }
-  GrowattHub *parent_{nullptr};
+  GrowattAddressTool *parent_{nullptr};
   bool is_target_{false};
 };
 
 class GrowattAddressButton : public button::Button {
  public:
-  void set_parent(GrowattHub *p) { this->parent_ = p; }
+  void set_parent(GrowattAddressTool *p) { this->parent_ = p; }
 
  protected:
   void press_action() override {
     if (this->parent_ != nullptr)
-      this->parent_->start_address_change();
+      this->parent_->start();
   }
-  GrowattHub *parent_{nullptr};
+  GrowattAddressTool *parent_{nullptr};
 };
 
 }  // namespace growatt_master

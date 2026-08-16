@@ -42,7 +42,7 @@ from esphome.const import (
     UNIT_WATT,
 )
 
-CODEOWNERS = ["@adydeac"]
+CODEOWNERS = ["@mikesnet"]
 DEPENDENCIES = ["modbus"]
 AUTO_LOAD = [
     "sensor",
@@ -69,11 +69,23 @@ CONF_MODULE_VOLTAGE = "battery_module_voltage"
 CONF_MODULE_CAPACITY = "battery_module_capacity"
 CONF_DISCHARGE_HOURS = "battery_discharge_hours"
 CONF_UPS_AVG_WINDOW = "ups_load_average_samples"
-# Bus level address change tool, unrelated to the inverters declared below.
+# Optional split of the bus. 'modbus_id' stays valid on its own and keeps
+# everything on one bus; naming either of the specific ones routes that device
+# type elsewhere. A device may still override its own bus.
+CONF_INVERTERS_MODBUS_ID = "inverters_modbus_id"
+CONF_METERS_MODBUS_ID = "meters_modbus_id"
+
+# Bus level address change tools, unrelated to the devices declared below.
 CONF_ADDR_CHANGE = "change_inverter_address"
 CONF_ADDR_FROM = "change_inverter_address_from"
 CONF_ADDR_TO = "change_inverter_address_to"
 CONF_ADDR_STATUS = "change_inverter_address_status"
+CONF_MADDR_CHANGE = "change_meter_address"
+CONF_MADDR_FROM = "change_meter_address_from"
+CONF_MADDR_TO = "change_meter_address_to"
+CONF_MADDR_STATUS = "change_meter_address_status"
+CONF_ADDR_TOOL_ID = "address_tool_id"
+CONF_MADDR_TOOL_ID = "meter_address_tool_id"
 # Output below which the per phase power registers cannot be judged.
 CONF_PHASE_DETECT_MIN = "phase_power_detect_threshold"
 # Counters and diagnostics use this cadence; update_interval stays fast enough
@@ -98,6 +110,9 @@ GrowattInverterAddressNumber = ns.class_(
 GrowattMeterAddressNumber = ns.class_("GrowattMeterAddressNumber", number.Number)
 GrowattPhaseCountSelect = ns.class_("GrowattPhaseCountSelect", select.Select)
 GrowattStringsSelect = ns.class_("GrowattStringsSelect", select.Select)
+GrowattAddressTool = ns.class_(
+    "GrowattAddressTool", cg.Component, modbus.ModbusDevice
+)
 GrowattAddressNumber = ns.class_("GrowattAddressNumber", number.Number)
 GrowattAddressButton = ns.class_("GrowattAddressButton", button.Button)
 GrowattPhaseSelect = ns.class_("GrowattPhaseSelect", select.Select)
@@ -532,6 +547,9 @@ def _window_schema():
 def _inverter_schema():
     schema = {
         cv.GenerateID(): cv.declare_id(GrowattInverter),
+        # Overrides the bus this device type routes to, for the odd unit that
+        # sits on the other line.
+        cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
         # 0 or omitted = slot not present. The value stored in flash takes
         # precedence at boot, so this is only the first-boot default.
         # The address is an entity rather than a fixed value: it lives in
@@ -663,6 +681,9 @@ def _meter_phase_schema():
 def _meter_schema():
     schema = {
         cv.GenerateID(): cv.declare_id(GrowattMeter),
+        # Overrides the bus this device type routes to, for the odd unit that
+        # sits on the other line.
+        cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
         # 0 or omitted = meter not present. Flash wins at boot.
         # Eastron specifies 1..247 for the whole SDM family, so there is
         # nothing above that to reach. 0 marks the slot empty.
@@ -687,7 +708,21 @@ def _meter_schema():
     return cv.Schema(schema).extend(cv.polling_component_schema("10s"))
 
 
+def _bus_for(config, key):
+    """Which bus a device type routes to: its own, else the shared fallback."""
+    return config.get(key) or config.get(modbus.CONF_MODBUS_ID)
+
+
 def _validate(config):
+    for key, what in (
+        (CONF_INVERTERS_MODBUS_ID, "inverters"),
+        (CONF_METERS_MODBUS_ID, "meters"),
+    ):
+        if _bus_for(config, key) is None:
+            raise cv.Invalid(
+                f"no bus for the {what}: set '{key}', or 'modbus_id' to put "
+                f"everything on one bus"
+            )
     n = len(config[CONF_INVERTERS])
     if n > config[CONF_MAX_INVERTERS]:
         raise cv.Invalid(
@@ -701,7 +736,26 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(GrowattHub),
-            cv.GenerateID(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
+            # One bus for everything, or one per device type. Keeping the
+            # meter on its own bus means a mute inverter can no longer stall
+            # the reading the controller depends on, and vice versa.
+            cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
+            cv.Optional(CONF_INVERTERS_MODBUS_ID): cv.use_id(modbus.Modbus),
+            cv.Optional(CONF_METERS_MODBUS_ID): cv.use_id(modbus.Modbus),
+            cv.GenerateID(CONF_ADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
+            cv.GenerateID(CONF_MADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
+            cv.Optional(CONF_MADDR_FROM): number.number_schema(
+                GrowattAddressNumber, icon="mdi:import"
+            ),
+            cv.Optional(CONF_MADDR_TO): number.number_schema(
+                GrowattAddressNumber, icon="mdi:export"
+            ),
+            cv.Optional(CONF_MADDR_CHANGE): button.button_schema(
+                GrowattAddressButton, icon="mdi:rename-box"
+            ),
+            cv.Optional(CONF_MADDR_STATUS): text_sensor.text_sensor_schema(
+                icon="mdi:information-outline"
+            ),
             cv.Required(CONF_MAX_INVERTERS): cv.int_range(min=1, max=32),
             # Commissioning tool: writes holding 30 at whatever address is
             # entered, whether or not that unit is declared under 'inverters'.
@@ -881,38 +935,59 @@ async def _setup_windows(inv, conf, key, mode):
 async def to_code(config):
     hub = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(hub, config)
-    # The hub only takes a place on the bus when the address tool is actually
-    # configured. It sits at 0, the broadcast address, so it never matches an
-    # incoming frame except while the tool is running and has pointed it
-    # somewhere - but a device that is not registered cannot interfere at all,
-    # which is worth more than the convenience of registering unconditionally.
-    addr_tool = any(
-        k in config
-        for k in (CONF_ADDR_CHANGE, CONF_ADDR_FROM, CONF_ADDR_TO, CONF_ADDR_STATUS)
-    )
-    if addr_tool:
+    cg.add(hub.set_max_inverters(config[CONF_MAX_INVERTERS]))
+
+    # One address tool per bus. A ModbusClientDevice belongs to exactly one bus,
+    # so a hub spanning two of them cannot be the tool itself. Each sits at 0,
+    # the broadcast address, and so never matches an incoming frame except while
+    # it is running and has pointed itself somewhere.
+    for tool_key, bus_key, entities, label, reg, is_float in (
+        (
+            CONF_ADDR_TOOL_ID,
+            CONF_INVERTERS_MODBUS_ID,
+            (CONF_ADDR_FROM, CONF_ADDR_TO, CONF_ADDR_CHANGE, CONF_ADDR_STATUS),
+            "inverter",
+            "GROWATT_COM_ADDRESS",
+            False,
+        ),
+        (
+            CONF_MADDR_TOOL_ID,
+            CONF_METERS_MODBUS_ID,
+            (CONF_MADDR_FROM, CONF_MADDR_TO, CONF_MADDR_CHANGE, CONF_MADDR_STATUS),
+            "meter",
+            "EASTRON_COM_ADDRESS",
+            True,
+        ),
+    ):
+        from_key, to_key, btn_key, status_key = entities
+        if not any(k in config for k in entities):
+            continue
+        tool = cg.new_Pvariable(config[tool_key])
+        await cg.register_component(tool, {})
         await modbus.register_modbus_client_device(
-            hub,
+            tool,
             {
-                modbus.CONF_MODBUS_ID: config[modbus.CONF_MODBUS_ID],
+                modbus.CONF_MODBUS_ID: _bus_for(config, bus_key),
                 CONF_ADDRESS: 0,
             },
         )
-    cg.add(hub.set_max_inverters(config[CONF_MAX_INVERTERS]))
+        cg.add(tool.set_label(label))
+        cg.add(tool.set_address_register(cg.RawExpression(reg)))
+        cg.add(tool.set_float_format(is_float))
+        for key, is_target in ((from_key, False), (to_key, True)):
+            if key in config:
+                num = await number.new_number(
+                    config[key], min_value=0, max_value=254, step=1
+                )
+                cg.add(num.set_parent(tool))
+                cg.add(num.set_is_target(is_target))
+        if btn_key in config:
+            btn = await button.new_button(config[btn_key])
+            cg.add(btn.set_parent(tool))
+        if status_key in config:
+            ts = await text_sensor.new_text_sensor(config[status_key])
+            cg.add(tool.set_status(ts))
 
-    for key, is_target in ((CONF_ADDR_FROM, False), (CONF_ADDR_TO, True)):
-        if key in config:
-            num = await number.new_number(
-                config[key], min_value=0, max_value=254, step=1
-            )
-            cg.add(num.set_parent(hub))
-            cg.add(num.set_is_target(is_target))
-    if CONF_ADDR_CHANGE in config:
-        btn = await button.new_button(config[CONF_ADDR_CHANGE])
-        cg.add(btn.set_parent(hub))
-    if CONF_ADDR_STATUS in config:
-        ts = await text_sensor.new_text_sensor(config[CONF_ADDR_STATUS])
-        cg.add(hub.set_addr_status(ts))
     cg.add(hub.set_stalled_timeout(config[CONF_DEVICE_STALLED]))
     cg.add(hub.set_offline_timeout(config[CONF_DEVICE_OFFLINE]))
     cg.add(hub.set_offline_probe_interval(config[CONF_OFFLINE_PROBE]))
@@ -980,7 +1055,8 @@ async def to_code(config):
         await modbus.register_modbus_client_device(
             inv,
             {
-                modbus.CONF_MODBUS_ID: config[modbus.CONF_MODBUS_ID],
+                modbus.CONF_MODBUS_ID: conf.get(modbus.CONF_MODBUS_ID)
+                or _bus_for(config, CONF_INVERTERS_MODBUS_ID),
                 CONF_ADDRESS: 0,
             },
         )
@@ -1101,7 +1177,8 @@ async def to_code(config):
         await modbus.register_modbus_client_device(
             meter,
             {
-                modbus.CONF_MODBUS_ID: config[modbus.CONF_MODBUS_ID],
+                modbus.CONF_MODBUS_ID: mconf.get(modbus.CONF_MODBUS_ID)
+                or _bus_for(config, CONF_METERS_MODBUS_ID),
                 CONF_ADDRESS: 0,
             },
         )
