@@ -454,7 +454,6 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // memory off the power rate writes stay volatile, which both spares the
   // EEPROM and lets the inverter come back at full power if the controller
   // ever stops running.
-  void set_protect_eeprom(bool v) { this->protect_eeprom_ = v; }
 
   // Window edits are staged in memory. Nothing reaches the inverter until
   // apply_windows(), because the firmware needs the whole block at once.
@@ -524,8 +523,6 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint8_t get_safe_power_rate() const { return this->safe_power_rate_; }
   void apply_safe_power_rate(float v);
   void set_safe_rate_number(number::Number *n) { this->safe_rate_num_ = n; }
-  void set_min_power_rate(uint8_t v) { this->min_power_rate_ = v; }
-  void set_max_power_rate(uint8_t v) { this->max_power_rate_ = v; }
   // Runtime edits. Each stores, persists, and where it matters takes effect at
   // once rather than at the next identification.
   void apply_min_power_rate(float v);
@@ -557,7 +554,6 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // and others the line to line voltage (around 400 V). The protection limits
   // have to be written in whichever convention the unit uses.
   bool reports_line_voltage() const;
-  void set_voltage_convention(uint8_t c) { this->cfg_convention_ = c; }
   // What this unit measures at its own terminals, which is higher than the
   // meter sees by whatever the AC cabling drops. Highest of the three, since one
   // phase over the limit is enough to trip the whole unit.
@@ -587,7 +583,6 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // registers hold something different.
   void set_protection_targets(float phase_low, float phase_high, float line_low,
                               float line_high, uint16_t restart_delay_s);
-  void set_auto_protection(bool v) { this->auto_protection_ = v; }
 
   // What the inverter reports it is actually doing, used by the controller to
   // tell "cannot go higher" apart from "has not been asked to".

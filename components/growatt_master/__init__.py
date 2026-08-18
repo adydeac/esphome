@@ -161,8 +161,6 @@ CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
 CONF_AVG_SAMPLES = "average_samples"
 
 # ------------------------------ power controller ------------------------------
-CONF_MIN_POWER_RATE = "min_power_rate"
-CONF_MAX_POWER_RATE = "max_power_rate"
 
 (
     HUB_PHASE_V_LOW,
@@ -194,10 +192,8 @@ CONF_MAX_POWER_RATE = "max_power_rate"
     HUB_VOLTAGE_SOFT_MARGIN,
 ) = range(27)
 
-CONF_AUTO_PROTECTION = "auto_protection_limits"
 CONF_REBALANCING = "phase_rebalancing"
 CONF_REBALANCE_THRESHOLD = "rebalance_threshold"
-CONF_VOLTAGE_CONVENTION = "voltage_convention"
 
 # Must match VoltageConvention in growatt_inverter.h
 VOLTAGE_CONVENTIONS = {"auto": 0, "phase": 1, "line": 2}
@@ -230,8 +226,10 @@ HUB_SETTINGS = {
     # is the starting point and whatever is set at runtime wins after that.
     # Intervals are in seconds because that is what a person tuning them thinks
     # in, and because a number entity has no notion of "5min".
-    "update_interval": (HUB_UPDATE_INTERVAL, 2, 0.5, 60, 0.5, UNIT_SECOND,
-                        "mdi:timer-outline"),
+    # Not "update_interval": polling_component_schema already claims that name
+    # for the compile time value, and the entity would silently replace it.
+    "update_interval_number": (HUB_UPDATE_INTERVAL, 2, 0.5, 60, 0.5,
+                               UNIT_SECOND, "mdi:timer-outline"),
     "step_interval": (HUB_STEP_INTERVAL, 6, 1, 300, 1, UNIT_SECOND,
                       "mdi:timer-cog-outline"),
     "refresh_interval": (HUB_REFRESH_INTERVAL, 60, 5, 3600, 5, UNIT_SECOND,
@@ -333,7 +331,6 @@ CONF_DUMP = "dump_registers"
 CONF_PHASE_SELECT = "phase"
 CONF_BATTERY_TYPE_SELECT = "battery_type_select"
 CONF_EXPORT_LIMIT_SELECT = "export_limit_mode"
-CONF_PROTECT_EEPROM = "protect_eeprom"
 
 # key -> (holding address, on value, off value, icon)
 # Holding 2 decides whether registers 3, 4, 5 and 99 survive a power cycle.
@@ -677,20 +674,6 @@ def _inverter_schema():
         # raise it if the warning ever appears on a unit that is fine. Zero
         # disables the floor and leans entirely on the repeat confirmations.
         cv.Optional(CONF_PHASE_DETECT_MIN, default=100): cv.float_range(min=0),
-        # Bounds for the power controller. Setting both to the same value takes
-        # this inverter out of automatic control.
-        cv.Optional(CONF_MIN_POWER_RATE, default=0): cv.int_range(min=0, max=100),
-        cv.Optional(CONF_MAX_POWER_RATE, default=100): cv.int_range(min=0, max=100),
-        # These are grid code protection registers. Writing them wrong can stop
-        # the inverter connecting, or stop it disconnecting when it should, so
-        # the automatic adjustment is opt in.
-        cv.Optional(CONF_AUTO_PROTECTION, default=False): cv.boolean,
-        # Which limits the inverter expects in its protection registers. "auto"
-        # picks line whenever the unit populates its line to line registers,
-        # which some models do while still reporting 230 V phase voltages.
-        cv.Optional(CONF_VOLTAGE_CONVENTION, default="auto"): cv.enum(
-            VOLTAGE_CONVENTIONS, lower=True
-        ),
         cv.Optional(
             CONF_SLOW_UPDATE_INTERVAL, default="30s"
         ): cv.positive_time_period_milliseconds,
@@ -717,9 +700,6 @@ def _inverter_schema():
         cv.Optional(CONF_EXPORT_LIMIT_SELECT): select.select_schema(
             GrowattRegisterSelect, icon="mdi:export"
         ),
-        # Clears holding 2 at boot so the frequent power rate writes never
-        # reach the EEPROM.
-        cv.Optional(CONF_PROTECT_EEPROM, default=False): cv.boolean,
     }
     for key, (_addr, _on, _off, icon) in REGISTER_SWITCHES.items():
         schema[cv.Optional(key)] = switch.switch_schema(
@@ -1129,10 +1109,6 @@ async def to_code(config):
         cg.add(inv.set_ups_avg_window(conf[CONF_UPS_AVG_WINDOW]))
         cg.add(inv.set_phase_detect_min_power(conf[CONF_PHASE_DETECT_MIN]))
         cg.add(inv.set_slow_interval(conf[CONF_SLOW_UPDATE_INTERVAL]))
-        cg.add(inv.set_min_power_rate(conf[CONF_MIN_POWER_RATE]))
-        cg.add(inv.set_max_power_rate(conf[CONF_MAX_POWER_RATE]))
-        cg.add(inv.set_auto_protection(conf[CONF_AUTO_PROTECTION]))
-        cg.add(inv.set_voltage_convention(conf[CONF_VOLTAGE_CONVENTION]))
 
         await _setup_triples(
             inv, conf, [CONF_PHASE_A, CONF_PHASE_B, CONF_PHASE_C],
@@ -1241,7 +1217,6 @@ async def to_code(config):
             cg.add(sw.set_parent(inv))
             cg.add(inv.set_ac_charge_switch(sw))
 
-        cg.add(inv.set_protect_eeprom(conf[CONF_PROTECT_EEPROM]))
         for key, (addr, on_val, off_val, _icon) in REGISTER_SWITCHES.items():
             if key in conf:
                 sw = await switch.new_switch(conf[key])
