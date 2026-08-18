@@ -342,7 +342,16 @@ retimed and started again.
 
 Per inverter: min and max power rate, safe rate, both poll intervals, voltage
 convention, automatic protection limits, EEPROM setting memory. Per meter: both
-poll intervals. Changing a bound applies it immediately if the current setpoint
+poll intervals.
+
+The poll intervals cost something to get right. `update_interval` is ESPHome's
+own key, added by `polling_component_schema`, so an entity by that name would
+silently replace it - the first attempt worked around that by calling the entity
+`update_interval_number`, which left two keys for one setting and confused more
+than it helped. The schemas now extend `COMPONENT_SCHEMA` instead and set the
+interval from a constant in `to_code`, which frees the name for the entity.
+Changing it needs `stop_poller()` / `set_update_interval()` / `start_poller()`;
+a `PollingComponent` will not notice on its own. Changing a bound applies it immediately if the current setpoint
 falls outside it, because a bound that does not contain the setpoint is not a
 bound. Changing the voltage convention or turning automatic protection on
 clears `protection_applied_`, so the trip thresholds go out again in the new

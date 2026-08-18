@@ -83,8 +83,8 @@ CONVENTIONS = ["Auto", "Phase", "Line"]
 INVERTER_RATES = {
     "min_power_rate": (0, 0, 100, 1, UNIT_PERCENT, "mdi:arrow-collapse-down"),
     "max_power_rate": (1, 0, 100, 1, UNIT_PERCENT, "mdi:arrow-collapse-up"),
-    "update_interval_number": (2, 1, 600, 1, UNIT_SECOND, "mdi:timer-outline"),
-    "slow_update_interval_number": (3, 5, 3600, 5, UNIT_SECOND,
+    "update_interval": (2, 1, 600, 1, UNIT_SECOND, "mdi:timer-outline"),
+    "slow_update_interval": (3, 5, 3600, 5, UNIT_SECOND,
                                     "mdi:timer-sand"),
 }
 
@@ -106,7 +106,17 @@ CONF_MADDR_TOOL_ID = "meter_address_tool_id"
 CONF_PHASE_DETECT_MIN = "phase_power_detect_threshold"
 # Counters and diagnostics use this cadence; update_interval stays fast enough
 # for control decisions.
+CONF_UPDATE_INTERVAL_NUM = "update_interval"
 CONF_SLOW_UPDATE_INTERVAL = "slow_update_interval"
+
+# Poll intervals are entities, not YAML keys: ESPHome's own 'update_interval'
+# would otherwise occupy the name, and two keys for one setting confused more
+# than it helped. These are the values a device starts at before flash has
+# anything to say.
+DEFAULT_HUB_INTERVAL = 2000
+DEFAULT_INVERTER_INTERVAL = 10000
+DEFAULT_METER_INTERVAL = 2000
+DEFAULT_SLOW_INTERVAL = 30000
 
 ns = cg.esphome_ns.namespace("growatt_master")
 GrowattHub = ns.class_("GrowattHub", cg.Component)
@@ -226,9 +236,7 @@ HUB_SETTINGS = {
     # is the starting point and whatever is set at runtime wins after that.
     # Intervals are in seconds because that is what a person tuning them thinks
     # in, and because a number entity has no notion of "5min".
-    # Not "update_interval": polling_component_schema already claims that name
-    # for the compile time value, and the entity would silently replace it.
-    "update_interval_number": (HUB_UPDATE_INTERVAL, 2, 0.5, 60, 0.5,
+    "update_interval": (HUB_UPDATE_INTERVAL, 2, 0.5, 60, 0.5,
                                UNIT_SECOND, "mdi:timer-outline"),
     "step_interval": (HUB_STEP_INTERVAL, 6, 1, 300, 1, UNIT_SECOND,
                       "mdi:timer-cog-outline"),
@@ -551,6 +559,9 @@ def _box_number(class_, **kwargs):
     control. Overriding the schema default still lets a user pick another mode
     from YAML.
     """
+    # number_schema validates unit_of_measurement as a string, so a dimensionless
+    # entity has to omit the argument rather than pass None.
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
     return number.number_schema(class_, **kwargs).extend(
         {cv.Optional(CONF_MODE, default="BOX"): cv.enum(
             number.NUMBER_MODES, upper=True)}
@@ -674,10 +685,6 @@ def _inverter_schema():
         # raise it if the warning ever appears on a unit that is fine. Zero
         # disables the floor and leans entirely on the repeat confirmations.
         cv.Optional(CONF_PHASE_DETECT_MIN, default=100): cv.float_range(min=0),
-        cv.Optional(
-            CONF_SLOW_UPDATE_INTERVAL, default="30s"
-        ): cv.positive_time_period_milliseconds,
-        # control surface
         cv.Optional(CONF_AC_CHARGE): switch.switch_schema(
             GrowattAcChargeSwitch, icon="mdi:transmission-tower-import"
         ),
@@ -719,7 +726,7 @@ def _inverter_schema():
         schema[cv.Optional(key)] = _schema_from(entry)
     for key in TEXT_SENSORS:
         schema[cv.Optional(key)] = text_sensor.text_sensor_schema()
-    return cv.Schema(schema).extend(cv.polling_component_schema("10s"))
+    return cv.Schema(schema).extend(cv.COMPONENT_SCHEMA)
 
 
 def _meter_phase_schema():
@@ -761,11 +768,11 @@ def _meter_schema():
             GrowattMeterAddressNumber, icon="mdi:identifier"
         ),
         # Override for phase count; "Auto" leaves detection in charge.
-        cv.Optional("update_interval_number"): _box_number(
+        cv.Optional(CONF_UPDATE_INTERVAL_NUM): _box_number(
             GrowattMeterIntervalNumber, unit_of_measurement=UNIT_SECOND,
             icon="mdi:timer-outline"
         ),
-        cv.Optional("slow_update_interval_number"): _box_number(
+        cv.Optional(CONF_SLOW_UPDATE_INTERVAL): _box_number(
             GrowattMeterIntervalNumber, unit_of_measurement=UNIT_SECOND,
             icon="mdi:timer-sand"
         ),
@@ -773,9 +780,6 @@ def _meter_schema():
             GrowattMeterModelSelect, icon="mdi:meter-electric"
         ),
         cv.Optional(CONF_INFO): text_sensor.text_sensor_schema(),
-        cv.Optional(
-            CONF_SLOW_UPDATE_INTERVAL, default="30s"
-        ): cv.positive_time_period_milliseconds,
     }
     for key in (CONF_PHASE_A, CONF_PHASE_B, CONF_PHASE_C):
         schema[cv.Optional(key)] = _meter_phase_schema()
@@ -783,7 +787,7 @@ def _meter_schema():
         schema[cv.Optional(key)] = _volt()
     for key, entry in METER_SENSORS.items():
         schema[cv.Optional(key)] = _schema_from(entry)
-    return cv.Schema(schema).extend(cv.polling_component_schema("10s"))
+    return cv.Schema(schema).extend(cv.COMPONENT_SCHEMA)
 
 
 def _bus_for(config, key):
@@ -911,7 +915,7 @@ CONFIG_SCHEMA = cv.All(
                 for k, (_setter, i, d) in HUB_BINARY_SENSORS.items()
             },
         }
-    ).extend(cv.polling_component_schema("2s")),
+    ).extend(cv.COMPONENT_SCHEMA),
     _validate,
 )
 
@@ -970,6 +974,9 @@ async def _setup_windows(inv, conf, key, mode):
 
 async def to_code(config):
     hub = cg.new_Pvariable(config[CONF_ID])
+    # No longer taken from YAML: the tick is an entity, and this is only the
+    # value it starts at before flash is read.
+    cg.add(hub.set_update_interval(DEFAULT_HUB_INTERVAL))
     await cg.register_component(hub, config)
     cg.add(hub.set_max_inverters(config[CONF_MAX_INVERTERS]))
     cg.add(hub.set_offline_hold(config[CONF_OFFLINE_HOLD]))
@@ -1091,6 +1098,8 @@ async def to_code(config):
             },
         )
 
+        cg.add(inv.set_update_interval(DEFAULT_INVERTER_INTERVAL))
+        cg.add(inv.set_slow_interval(DEFAULT_SLOW_INTERVAL))
         cg.add(inv.set_slot_index(i))
         cg.add(inv.set_cfg_phases(conf[CONF_PHASES]))
         cg.add(inv.set_cfg_strings(conf[CONF_STRINGS]))
@@ -1108,7 +1117,6 @@ async def to_code(config):
         cg.add(inv.set_discharge_hours(conf[CONF_DISCHARGE_HOURS]))
         cg.add(inv.set_ups_avg_window(conf[CONF_UPS_AVG_WINDOW]))
         cg.add(inv.set_phase_detect_min_power(conf[CONF_PHASE_DETECT_MIN]))
-        cg.add(inv.set_slow_interval(conf[CONF_SLOW_UPDATE_INTERVAL]))
 
         await _setup_triples(
             inv, conf, [CONF_PHASE_A, CONF_PHASE_B, CONF_PHASE_C],
@@ -1253,12 +1261,13 @@ async def to_code(config):
         )
         cg.add(num.set_parent(meter))
         cg.add(meter.set_address_number(num))
+        cg.add(meter.set_update_interval(DEFAULT_METER_INTERVAL))
+        cg.add(meter.set_slow_interval(DEFAULT_SLOW_INTERVAL))
         cg.add(meter.set_slot_index(i))
-        cg.add(meter.set_slow_interval(mconf[CONF_SLOW_UPDATE_INTERVAL]))
 
         for key, is_slow, setter in (
-            ("update_interval_number", False, "set_update_number"),
-            ("slow_update_interval_number", True, "set_slow_number"),
+            (CONF_UPDATE_INTERVAL_NUM, False, "set_update_number"),
+            (CONF_SLOW_UPDATE_INTERVAL, True, "set_slow_number"),
         ):
             if key in mconf:
                 inum = await number.new_number(

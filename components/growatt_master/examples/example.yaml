@@ -58,10 +58,6 @@ growatt_master:
   # might ever be declared, not just those present today.
   max_inverters: 5
 
-  # The hub's own tick, as a compile time starting value. The entity below is
-  # what changes it afterwards.
-  update_interval: 2s
-
   meter_offline_hold: 5min
   grid_power_sensor_id: mains_contactor
 
@@ -90,8 +86,8 @@ growatt_master:
     name: "Hub Battery Soc Max"
   grid_export_limit:
     name: "Hub Grid Export Limit"
-  update_interval_number:
-    name: "Hub Update Interval Number"
+  update_interval:
+    name: "Hub Tick"
   step_interval:
     name: "Hub Step Interval"
   refresh_interval:
@@ -192,8 +188,6 @@ growatt_master:
         name: "Growatt01 Address"
         mode: box
       # modbus_id: bus_meters
-      update_interval: 10s
-      slow_update_interval: 30s
       phase: L1
       phases: 0
       strings: 0
@@ -208,10 +202,10 @@ growatt_master:
         name: "Growatt01 Min Power Rate"
       max_power_rate:
         name: "Growatt01 Max Power Rate"
-      update_interval_number:
-        name: "Growatt01 Update Interval Number"
-      slow_update_interval_number:
-        name: "Growatt01 Slow Update Interval Number"
+      update_interval:
+        name: "Growatt01 Poll Interval"
+      slow_update_interval:
+        name: "Growatt01 Slow Poll Interval"
       safe_power_rate:
         name: "Growatt01 Safe Power Rate"
       voltage_convention_select:
@@ -628,11 +622,9 @@ growatt_master:
         name: "Grid Meter Address"
         mode: box
       # modbus_id: bus_inverters
-      update_interval: 2s
-      slow_update_interval: 30s
-      update_interval_number:
+      update_interval:
         name: "Grid Meter Poll Interval"
-      slow_update_interval_number:
+      slow_update_interval:
         name: "Grid Meter Slow Poll Interval"
       model_select:
         name: "Grid Meter Model"
