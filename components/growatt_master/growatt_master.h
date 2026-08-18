@@ -7,6 +7,7 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
+#include "esphome/components/select/select.h"
 #include "esphome/components/button/button.h"
 #include <vector>
 #include <string>
@@ -97,12 +98,58 @@ enum HubSetting : uint8_t {
   HUB_BATTERY_SOC_MIN,     // %
   HUB_BATTERY_SOC_MAX,     // %
   HUB_GRID_EXPORT_LIMIT,   // W, hard cap enforced by the controller
+  // Everything below was a compile time option until it became clear that
+  // tuning a controller through recompile-and-flash cycles is its own kind of
+  // obstacle. The YAML value is now the starting point; flash wins after that.
+  HUB_UPDATE_INTERVAL,     // s, hub tick
+  HUB_STEP_INTERVAL,       // s, how often the controller may act
+  HUB_REFRESH_INTERVAL,    // s, setpoint rewrite even when unchanged
+  HUB_AVERAGE_SAMPLES,     // count
+  HUB_STALLED_TIMEOUT,     // s
+  HUB_OFFLINE_TIMEOUT,     // s
+  HUB_OFFLINE_PROBE,       // s
+  HUB_IMPORT_THRESHOLD,    // W
+  HUB_EXPORT_THRESHOLD,    // W
+  HUB_INCREASE_GAIN,
+  HUB_DECREASE_GAIN,
+  HUB_MIN_STEP,            // %
+  HUB_MAX_STEP,            // %
+  HUB_STARTUP_RATE,        // %
+  HUB_OFFGRID_RATE,        // %
+  HUB_PROTECTION_MARGIN,   // %
+  HUB_RESTART_DELAY,       // s
+  HUB_VOLTAGE_SOFT_MARGIN, // V
   HUB_SETTING_COUNT,
 };
 
+// Persistence layout. Every stored structure carries a version and a block of
+// reserved bytes, so a new field can be added later by spending reserved space
+// without changing sizeof - which is what makes the difference between "the new
+// setting starts at its default" and "every stored setting is lost", since a
+// size mismatch makes load() fail wholesale.
+//
+// Bump PREFS_VERSION only when the meaning of existing fields changes. Adding a
+// field out of the reserved block does not need it.
+static const uint8_t PREFS_VERSION = 1;
+
 struct GrowattHubPrefs {
+  uint8_t version;
+  uint8_t offline_action;
   float values[HUB_SETTING_COUNT];
+  uint8_t reserved[16];
 } __attribute__((packed));
+
+// What to do once the meter is definitively gone. Stopping is the safe default
+// for an export limited site, because without the meter there is no way to know
+// whether anything is being exported. It is also the most expensive: a comms
+// fault at midday throws away real production. Holding trades that for the risk
+// of exporting blind, and the third option splits the difference.
+enum OfflineAction : uint8_t {
+  OFF_STOP = 0,
+  OFF_HOLD,
+  OFF_DECAY,   // hold, then walk down to each inverter's safe rate
+  OFF_ACTION_COUNT,
+};
 
 // Meter health. A single missed frame must not trigger anything dramatic, so
 // there is a middle state between working and gone.
@@ -156,12 +203,13 @@ class GrowattHub : public PollingComponent {
   }
   bool grid_available() const;
 
-  void set_stalled_timeout(uint32_t ms) { this->stalled_ms_ = ms; }
-  void set_offline_timeout(uint32_t ms) { this->offline_ms_ = ms; }
+  void set_offline_action(uint8_t a);
+  uint8_t get_offline_action() const { return this->offline_action_; }
+  void set_offline_action_select(select::Select *s) { this->offline_select_ = s; }
+  void set_offline_hold(uint32_t ms) { this->offline_hold_ms_ = ms; }
   // How rarely an inverter that has gone offline is checked for a return. A
   // model without storage simply shuts down when the panels go dark, and each
   // pointless query costs more bus time in timeouts than a whole valid cycle.
-  void set_offline_probe_interval(uint32_t ms) { this->offline_probe_ms_ = ms; }
   void set_avg_window(uint8_t n) {
     this->avg_window_ = (n == 0 || n > HUB_AVG_MAX) ? HUB_AVG_MAX : n;
   }
@@ -177,16 +225,6 @@ class GrowattHub : public PollingComponent {
   // They are asymmetric on purpose: overshooting upwards means exporting, which
   // costs money, while overshooting downwards only means importing a little
   // longer.
-  void set_import_threshold(float w) { this->import_threshold_ = w; }
-  void set_export_threshold(float w) { this->export_threshold_ = w; }
-  void set_increase_gain(float g) { this->increase_gain_ = g; }
-  void set_decrease_gain(float g) { this->decrease_gain_ = g; }
-  void set_min_step(float s) { this->min_step_ = s; }
-  void set_max_step(float s) { this->max_step_ = s; }
-  void set_step_interval(uint32_t ms) { this->step_interval_ = ms; }
-  void set_refresh_interval(uint32_t ms) { this->refresh_interval_ = ms; }
-  void set_startup_rate(float p) { this->startup_rate_ = p; }
-  void set_offgrid_rate(float p) { this->offgrid_rate_ = p; }
   void set_controller_state(text_sensor::TextSensor *ts) { this->ctrl_ts_ = ts; }
 
   // Widens each inverter's own trip window past the range the controller works
@@ -197,9 +235,6 @@ class GrowattHub : public PollingComponent {
   // lifted. So near the limit the proportional step is abandoned and increases
   // creep, rather than jumping by up to max_step and tripping straight back
   // over.
-  void set_voltage_soft_margin(float v) { this->voltage_soft_margin_ = v; }
-  void set_protection_margin(float pct) { this->protection_margin_ = pct; }
-  void set_restart_delay(uint16_t s) { this->restart_delay_s_ = s; }
 
   // A single phase inverter sitting on the phase with the least headroom holds
   // back every three phase unit, because those are bound by the tightest
@@ -225,6 +260,7 @@ class GrowattHub : public PollingComponent {
 
  protected:
   void save_prefs_();
+  void apply_setting_(uint8_t field);
   void publish_settings_();
   void update_meter_health_();
   void update_aggregates_();
@@ -254,6 +290,11 @@ class GrowattHub : public PollingComponent {
   number::Number *setting_num_[HUB_SETTING_COUNT]{};
 
   binary_sensor::BinarySensor *grid_power_bs_{nullptr};
+  uint8_t offline_action_{OFF_STOP};
+  uint32_t offline_hold_ms_{300000};
+  uint32_t offline_since_{0};
+  bool offline_logged_{false};
+  select::Select *offline_select_{nullptr};
   uint32_t stalled_ms_{10000};
   uint32_t offline_ms_{20000};
   uint32_t offline_probe_ms_{60000};
@@ -306,6 +347,16 @@ class GrowattHub : public PollingComponent {
   uint16_t restart_delay_s_{30};
   bool rebalance_{true};
   float rebalance_threshold_{300.0f};
+};
+
+// Behaviour when the meter is gone. Persisted under its own key.
+class GrowattOfflineActionSelect : public select::Select {
+ public:
+  void set_parent(GrowattHub *p) { this->parent_ = p; }
+
+ protected:
+  void control(const std::string &value) override;
+  GrowattHub *parent_{nullptr};
 };
 
 // Threshold entity. Values live in the hub and are persisted there.

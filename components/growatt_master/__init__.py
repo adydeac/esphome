@@ -72,6 +72,22 @@ CONF_UPS_AVG_WINDOW = "ups_load_average_samples"
 # Optional split of the bus. 'modbus_id' stays valid on its own and keeps
 # everything on one bus; naming either of the specific ones routes that device
 # type elsewhere. A device may still override its own bus.
+# Must match OFFLINE_ACTIONS in growatt_master.cpp.
+OFFLINE_ACTIONS = ["Stop", "Hold", "Hold then reduce"]
+CONF_OFFLINE_ACTION = "meter_offline_action"
+CONF_OFFLINE_HOLD = "meter_offline_hold"
+CONF_SAFE_RATE = "safe_power_rate"
+# Must match CONV_NAMES in growatt_inverter.cpp.
+CONVENTIONS = ["Auto", "Phase", "Line"]
+# kind indices must match RATE_* in growatt_inverter.cpp
+INVERTER_RATES = {
+    "min_power_rate": (0, 0, 100, 1, UNIT_PERCENT, "mdi:arrow-collapse-down"),
+    "max_power_rate": (1, 0, 100, 1, UNIT_PERCENT, "mdi:arrow-collapse-up"),
+    "update_interval_number": (2, 1, 600, 1, UNIT_SECOND, "mdi:timer-outline"),
+    "slow_update_interval_number": (3, 5, 3600, 5, UNIT_SECOND,
+                                    "mdi:timer-sand"),
+}
+
 CONF_INVERTERS_MODBUS_ID = "inverters_modbus_id"
 CONF_METERS_MODBUS_ID = "meters_modbus_id"
 
@@ -108,6 +124,18 @@ GrowattInverterAddressNumber = ns.class_(
     "GrowattInverterAddressNumber", number.Number
 )
 GrowattMeterAddressNumber = ns.class_("GrowattMeterAddressNumber", number.Number)
+GrowattOfflineActionSelect = ns.class_(
+    "GrowattOfflineActionSelect", select.Select
+)
+GrowattSafeRateNumber = ns.class_("GrowattSafeRateNumber", number.Number)
+GrowattRateNumber = ns.class_("GrowattRateNumber", number.Number)
+GrowattConventionSelect = ns.class_("GrowattConventionSelect", select.Select)
+GrowattInverterOptionSwitch = ns.class_(
+    "GrowattInverterOptionSwitch", switch.Switch
+)
+GrowattMeterIntervalNumber = ns.class_(
+    "GrowattMeterIntervalNumber", number.Number
+)
 GrowattPhaseCountSelect = ns.class_("GrowattPhaseCountSelect", select.Select)
 GrowattStringsSelect = ns.class_("GrowattStringsSelect", select.Select)
 GrowattAddressTool = ns.class_(
@@ -128,24 +156,11 @@ GrowattHubNumber = ns.class_("GrowattHubNumber", number.Number)
 # Written down once here and consumed through the derived binary sensors, so
 # the YAML side never has to repeat a limit.
 CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
-# Health timeouts, applied to inverters and meters alike: they share one bus,
+# Health timeouts, applied to inverters and meters alike: the same question,
 # so there is no reason for them to disagree about what stalled means.
-CONF_DEVICE_STALLED = "device_stalled_timeout"
-CONF_DEVICE_OFFLINE = "device_offline_timeout"
-CONF_OFFLINE_PROBE = "device_offline_probe_interval"
 CONF_AVG_SAMPLES = "average_samples"
 
 # ------------------------------ power controller ------------------------------
-CONF_IMPORT_THRESHOLD = "import_threshold"
-CONF_EXPORT_THRESHOLD = "export_threshold"
-CONF_GAIN_UP = "increase_gain"
-CONF_GAIN_DOWN = "decrease_gain"
-CONF_MIN_STEP = "min_step"
-CONF_MAX_STEP = "max_step"
-CONF_STEP_INTERVAL = "step_interval"
-CONF_REFRESH_INTERVAL = "refresh_interval"
-CONF_STARTUP_RATE = "startup_power_rate"
-CONF_OFFGRID_RATE = "offgrid_power_rate"
 CONF_MIN_POWER_RATE = "min_power_rate"
 CONF_MAX_POWER_RATE = "max_power_rate"
 
@@ -159,11 +174,26 @@ CONF_MAX_POWER_RATE = "max_power_rate"
     HUB_BATTERY_SOC_MIN,
     HUB_BATTERY_SOC_MAX,
     HUB_GRID_EXPORT_LIMIT,
-) = range(9)
+    HUB_UPDATE_INTERVAL,
+    HUB_STEP_INTERVAL,
+    HUB_REFRESH_INTERVAL,
+    HUB_AVERAGE_SAMPLES,
+    HUB_STALLED_TIMEOUT,
+    HUB_OFFLINE_TIMEOUT,
+    HUB_OFFLINE_PROBE,
+    HUB_IMPORT_THRESHOLD,
+    HUB_EXPORT_THRESHOLD,
+    HUB_INCREASE_GAIN,
+    HUB_DECREASE_GAIN,
+    HUB_MIN_STEP,
+    HUB_MAX_STEP,
+    HUB_STARTUP_RATE,
+    HUB_OFFGRID_RATE,
+    HUB_PROTECTION_MARGIN,
+    HUB_RESTART_DELAY,
+    HUB_VOLTAGE_SOFT_MARGIN,
+) = range(27)
 
-CONF_VOLTAGE_SOFT_MARGIN = "grid_voltage_soft_margin"
-CONF_PROTECTION_MARGIN = "inverter_protection_margin"
-CONF_RESTART_DELAY = "inverter_restart_delay"
 CONF_AUTO_PROTECTION = "auto_protection_limits"
 CONF_REBALANCING = "phase_rebalancing"
 CONF_REBALANCE_THRESHOLD = "rebalance_threshold"
@@ -196,6 +226,45 @@ HUB_SETTINGS = {
     # inverters' own export limit registers. 0 disables the cap.
     "grid_export_limit": (HUB_GRID_EXPORT_LIMIT, 0, 0, 100000, 100, UNIT_WATT,
                           "mdi:transmission-tower-export"),
+    # Controller tuning. All of these were compile time options; the value here
+    # is the starting point and whatever is set at runtime wins after that.
+    # Intervals are in seconds because that is what a person tuning them thinks
+    # in, and because a number entity has no notion of "5min".
+    "update_interval": (HUB_UPDATE_INTERVAL, 2, 0.5, 60, 0.5, UNIT_SECOND,
+                        "mdi:timer-outline"),
+    "step_interval": (HUB_STEP_INTERVAL, 6, 1, 300, 1, UNIT_SECOND,
+                      "mdi:timer-cog-outline"),
+    "refresh_interval": (HUB_REFRESH_INTERVAL, 60, 5, 3600, 5, UNIT_SECOND,
+                         "mdi:refresh"),
+    "average_samples": (HUB_AVERAGE_SAMPLES, 60, 1, 60, 1, None,
+                        "mdi:chart-bell-curve"),
+    "device_stalled_timeout": (HUB_STALLED_TIMEOUT, 10, 1, 600, 1, UNIT_SECOND,
+                               "mdi:timer-sand"),
+    "device_offline_timeout": (HUB_OFFLINE_TIMEOUT, 20, 2, 3600, 1, UNIT_SECOND,
+                               "mdi:timer-alert-outline"),
+    "device_offline_probe_interval": (HUB_OFFLINE_PROBE, 60, 5, 3600, 5,
+                                      UNIT_SECOND, "mdi:radar"),
+    "import_threshold": (HUB_IMPORT_THRESHOLD, 100, 0, 10000, 10, UNIT_WATT,
+                         "mdi:transmission-tower-import"),
+    "export_threshold": (HUB_EXPORT_THRESHOLD, 0, 0, 10000, 10, UNIT_WATT,
+                         "mdi:transmission-tower-export"),
+    "increase_gain": (HUB_INCREASE_GAIN, 0.5, 0.05, 2, 0.05, None,
+                      "mdi:trending-up"),
+    "decrease_gain": (HUB_DECREASE_GAIN, 0.8, 0.05, 2, 0.05, None,
+                      "mdi:trending-down"),
+    "min_step": (HUB_MIN_STEP, 1, 1, 50, 1, UNIT_PERCENT, "mdi:step-forward"),
+    "max_step": (HUB_MAX_STEP, 20, 1, 100, 1, UNIT_PERCENT,
+                 "mdi:step-forward-2"),
+    "startup_power_rate": (HUB_STARTUP_RATE, 0, 0, 100, 1, UNIT_PERCENT,
+                           "mdi:restart"),
+    "offgrid_power_rate": (HUB_OFFGRID_RATE, 100, 0, 100, 1, UNIT_PERCENT,
+                           "mdi:transmission-tower-off"),
+    "inverter_protection_margin": (HUB_PROTECTION_MARGIN, 10, 0, 50, 1,
+                                   UNIT_PERCENT, "mdi:shield-outline"),
+    "inverter_restart_delay": (HUB_RESTART_DELAY, 30, 0, 600, 1, UNIT_SECOND,
+                               "mdi:timer-refresh-outline"),
+    "grid_voltage_soft_margin": (HUB_VOLTAGE_SOFT_MARGIN, 8, 0, 50, 1,
+                                 UNIT_VOLT, "mdi:speedometer-slow"),
 }
 
 # key -> (setter, icon, device_class)
@@ -560,6 +629,27 @@ def _inverter_schema():
         cv.Required(CONF_ADDRESS): number.number_schema(
             GrowattInverterAddressNumber, icon="mdi:identifier"
         ),
+        # Where this unit parks when the meter has been gone too long to keep
+        # holding. Editable at runtime; raising it above the current output
+        # applies immediately.
+        cv.Optional(CONF_SAFE_RATE): number.number_schema(
+            GrowattSafeRateNumber, icon="mdi:shield-half-full", unit_of_measurement="%"
+        ),
+        **{
+            cv.Optional(k): _box_number(
+                GrowattRateNumber, unit_of_measurement=u, icon=i
+            )
+            for k, (_kind, _lo, _hi, _s, u, i) in INVERTER_RATES.items()
+        },
+        cv.Optional("voltage_convention_select"): select.select_schema(
+            GrowattConventionSelect, icon="mdi:sine-wave"
+        ),
+        cv.Optional("auto_protection_limits_switch"): switch.switch_schema(
+            GrowattInverterOptionSwitch, icon="mdi:shield-outline"
+        ),
+        cv.Optional("protect_eeprom_switch"): switch.switch_schema(
+            GrowattInverterOptionSwitch, icon="mdi:memory"
+        ),
         cv.Optional(CONF_PHASES, default=0): cv.int_range(min=0, max=3),
         cv.Optional(CONF_STRINGS, default=0): cv.int_range(min=0, max=8),
         # The same two overrides as editable entities. They write the same
@@ -691,6 +781,14 @@ def _meter_schema():
             GrowattMeterAddressNumber, icon="mdi:identifier"
         ),
         # Override for phase count; "Auto" leaves detection in charge.
+        cv.Optional("update_interval_number"): _box_number(
+            GrowattMeterIntervalNumber, unit_of_measurement=UNIT_SECOND,
+            icon="mdi:timer-outline"
+        ),
+        cv.Optional("slow_update_interval_number"): _box_number(
+            GrowattMeterIntervalNumber, unit_of_measurement=UNIT_SECOND,
+            icon="mdi:timer-sand"
+        ),
         cv.Optional(CONF_MODEL_SELECT): select.select_schema(
             GrowattMeterModelSelect, icon="mdi:meter-electric"
         ),
@@ -740,6 +838,16 @@ CONFIG_SCHEMA = cv.All(
             # meter on its own bus means a mute inverter can no longer stall
             # the reading the controller depends on, and vice versa.
             cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
+            # What happens once the meter is definitively gone. Stopping is
+            # the safe default for an export limited site; the other two trade
+            # some of that safety for not throwing away production during a
+            # comms fault.
+            cv.Optional(CONF_OFFLINE_ACTION): select.select_schema(
+                GrowattOfflineActionSelect, icon="mdi:transmission-tower-off"
+            ),
+            cv.Optional(
+                CONF_OFFLINE_HOLD, default="5min"
+            ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_INVERTERS_MODBUS_ID): cv.use_id(modbus.Modbus),
             cv.Optional(CONF_METERS_MODBUS_ID): cv.use_id(modbus.Modbus),
             cv.GenerateID(CONF_ADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
@@ -779,58 +887,6 @@ CONFIG_SCHEMA = cv.All(
             # connected. Without it the grid is assumed to be always available.
             cv.Optional(CONF_GRID_POWER_SENSOR_ID): cv.use_id(
                 binary_sensor.BinarySensor
-            ),
-            cv.Optional(
-                CONF_DEVICE_STALLED, default="10s"
-            ): cv.positive_time_period_milliseconds,
-            cv.Optional(
-                CONF_DEVICE_OFFLINE, default="20s"
-            ): cv.positive_time_period_milliseconds,
-            # An inverter without storage shuts down when the panels go dark.
-            # Querying it then costs more bus time in timeouts than a whole
-            # valid cycle, so it is only checked this often until it answers.
-            cv.Optional(
-                CONF_OFFLINE_PROBE, default="60s"
-            ): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_AVG_SAMPLES, default=60): cv.int_range(min=1, max=60),
-            # controller tuning
-            cv.Optional(CONF_IMPORT_THRESHOLD, default=100): cv.float_range(min=0),
-            cv.Optional(CONF_EXPORT_THRESHOLD, default=0): cv.float_range(min=0),
-            # Fraction of the measured deviation each step tries to close.
-            # Lower when raising: overshooting there means exporting, which
-            # costs money, while overshooting downwards only means importing a
-            # little longer.
-            cv.Optional(CONF_GAIN_UP, default=0.5): cv.float_range(
-                min=0.05, max=1.0
-            ),
-            cv.Optional(CONF_GAIN_DOWN, default=0.8): cv.float_range(
-                min=0.05, max=1.0
-            ),
-            # The active power register takes whole percent, so anything below
-            # one would round away and waste the cycle.
-            cv.Optional(CONF_MIN_STEP, default=1): cv.float_range(min=1, max=50),
-            cv.Optional(CONF_MAX_STEP, default=20): cv.float_range(min=1, max=100),
-            cv.Optional(
-                CONF_STEP_INTERVAL, default="6s"
-            ): cv.positive_time_period_milliseconds,
-            cv.Optional(
-                CONF_REFRESH_INTERVAL, default="60s"
-            ): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_STARTUP_RATE, default=0): cv.int_range(min=0, max=100),
-            cv.Optional(CONF_OFFGRID_RATE, default=100): cv.int_range(min=0, max=100),
-            # How far outside the controller's own window each inverter's trip
-            # thresholds are pushed, so there is room to react before the
-            # hardware disconnects and locks us out for minutes.
-            # Volts below the limit at which increases stop being
-            # proportional and start creeping by min_step instead.
-            cv.Optional(CONF_VOLTAGE_SOFT_MARGIN, default=8): cv.float_range(
-                min=0, max=50
-            ),
-            cv.Optional(CONF_PROTECTION_MARGIN, default=10): cv.float_range(
-                min=0, max=50
-            ),
-            cv.Optional(CONF_RESTART_DELAY, default=30): cv.int_range(
-                min=0, max=600
             ),
             # A single phase inverter on the tightest phase caps every three
             # phase unit. Trading some of its output releases three times as
@@ -936,6 +992,13 @@ async def to_code(config):
     hub = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(hub, config)
     cg.add(hub.set_max_inverters(config[CONF_MAX_INVERTERS]))
+    cg.add(hub.set_offline_hold(config[CONF_OFFLINE_HOLD]))
+    if CONF_OFFLINE_ACTION in config:
+        sel = await select.new_select(
+            config[CONF_OFFLINE_ACTION], options=OFFLINE_ACTIONS
+        )
+        cg.add(sel.set_parent(hub))
+        cg.add(hub.set_offline_action_select(sel))
 
     # One address tool per bus. A ModbusClientDevice belongs to exactly one bus,
     # so a hub spanning two of them cannot be the tool itself. Each sits at 0,
@@ -991,23 +1054,7 @@ async def to_code(config):
             ts = await text_sensor.new_text_sensor(config[status_key])
             cg.add(tool.set_status(ts))
 
-    cg.add(hub.set_stalled_timeout(config[CONF_DEVICE_STALLED]))
-    cg.add(hub.set_offline_timeout(config[CONF_DEVICE_OFFLINE]))
-    cg.add(hub.set_offline_probe_interval(config[CONF_OFFLINE_PROBE]))
     cg.add(hub.set_avg_window(config[CONF_AVG_SAMPLES]))
-    cg.add(hub.set_import_threshold(config[CONF_IMPORT_THRESHOLD]))
-    cg.add(hub.set_export_threshold(config[CONF_EXPORT_THRESHOLD]))
-    cg.add(hub.set_increase_gain(config[CONF_GAIN_UP]))
-    cg.add(hub.set_decrease_gain(config[CONF_GAIN_DOWN]))
-    cg.add(hub.set_min_step(config[CONF_MIN_STEP]))
-    cg.add(hub.set_max_step(config[CONF_MAX_STEP]))
-    cg.add(hub.set_step_interval(config[CONF_STEP_INTERVAL]))
-    cg.add(hub.set_refresh_interval(config[CONF_REFRESH_INTERVAL]))
-    cg.add(hub.set_startup_rate(config[CONF_STARTUP_RATE]))
-    cg.add(hub.set_offgrid_rate(config[CONF_OFFGRID_RATE]))
-    cg.add(hub.set_voltage_soft_margin(config[CONF_VOLTAGE_SOFT_MARGIN]))
-    cg.add(hub.set_protection_margin(config[CONF_PROTECTION_MARGIN]))
-    cg.add(hub.set_restart_delay(config[CONF_RESTART_DELAY]))
     cg.add(hub.set_rebalancing(config[CONF_REBALANCING]))
     cg.add(hub.set_rebalance_threshold(config[CONF_REBALANCE_THRESHOLD]))
 
@@ -1117,6 +1164,47 @@ async def to_code(config):
                 cg.add(num.set_field(field))
                 cg.add(inv.set_setting_number(field, num))
 
+        for key, (kind, lo, hi, step, _u, _i) in INVERTER_RATES.items():
+            if key in conf:
+                rnum = await number.new_number(
+                    conf[key], min_value=lo, max_value=hi, step=step
+                )
+                cg.add(rnum.set_parent(inv))
+                cg.add(rnum.set_kind(kind))
+                cg.add(
+                    getattr(
+                        inv,
+                        {
+                            0: "set_min_rate_number",
+                            1: "set_max_rate_number",
+                            2: "set_update_number",
+                            3: "set_slow_number",
+                        }[kind],
+                    )(rnum)
+                )
+        if "voltage_convention_select" in conf:
+            csel = await select.new_select(
+                conf["voltage_convention_select"], options=CONVENTIONS
+            )
+            cg.add(csel.set_parent(inv))
+            cg.add(inv.set_convention_select(csel))
+        for key, is_eeprom, setter in (
+            ("auto_protection_limits_switch", False, "set_auto_protection_switch"),
+            ("protect_eeprom_switch", True, "set_protect_eeprom_switch"),
+        ):
+            if key in conf:
+                sw = await switch.new_switch(conf[key])
+                cg.add(sw.set_parent(inv))
+                cg.add(sw.set_is_eeprom(is_eeprom))
+                cg.add(getattr(inv, setter)(sw))
+
+        if CONF_SAFE_RATE in conf:
+            snum = await number.new_number(
+                conf[CONF_SAFE_RATE], min_value=0, max_value=100, step=1
+            )
+            cg.add(snum.set_parent(inv))
+            cg.add(inv.set_safe_rate_number(snum))
+
         num = await number.new_number(
             conf[CONF_ADDRESS], min_value=0, max_value=254, step=1
         )
@@ -1192,6 +1280,18 @@ async def to_code(config):
         cg.add(meter.set_address_number(num))
         cg.add(meter.set_slot_index(i))
         cg.add(meter.set_slow_interval(mconf[CONF_SLOW_UPDATE_INTERVAL]))
+
+        for key, is_slow, setter in (
+            ("update_interval_number", False, "set_update_number"),
+            ("slow_update_interval_number", True, "set_slow_number"),
+        ):
+            if key in mconf:
+                inum = await number.new_number(
+                    mconf[key], min_value=1, max_value=3600, step=1
+                )
+                cg.add(inum.set_parent(meter))
+                cg.add(inum.set_is_slow(is_slow))
+                cg.add(getattr(meter, setter)(inum))
 
         if CONF_MODEL_SELECT in mconf:
             sel = await select.new_select(mconf[CONF_MODEL_SELECT],

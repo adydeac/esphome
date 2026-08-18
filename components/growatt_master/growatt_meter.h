@@ -93,9 +93,14 @@ enum MeterPoll : uint8_t {
   MPOLL_ENERGY,
 };
 
+// See PREFS_VERSION in growatt_master.h for the convention.
 struct MeterPrefs {
+  uint8_t version;
   uint8_t address;
   uint8_t model;
+  uint16_t update_interval;  // seconds
+  uint16_t slow_interval;    // seconds
+  uint8_t reserved[8];
 } __attribute__((packed));
 
 struct MeterTriple {
@@ -129,6 +134,10 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
   void set_address_number(number::Number *n) { this->address_num_ = n; }
   void set_model_select(select::Select *s) { this->model_select_ = s; }
   void set_slow_interval(uint32_t ms) { this->slow_interval_ = ms; }
+  void apply_update_interval(float seconds);
+  void apply_slow_interval(float seconds);
+  void set_update_number(number::Number *n) { this->update_num_ = n; }
+  void set_slow_number(number::Number *n) { this->slow_num_ = n; }
 
   bool is_enabled() const { return this->address_ != 0; }
   uint8_t get_phases() const { return this->phases_; }
@@ -215,6 +224,8 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
 
   select::Select *model_select_{nullptr};
   number::Number *address_num_{nullptr};
+  number::Number *update_num_{nullptr};
+  number::Number *slow_num_{nullptr};
   text_sensor::TextSensor *info_ts_{nullptr};
 
   MeterTriple phases_sens_[3];
@@ -239,6 +250,19 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
 
 // Which address this meter answers on. 0 means the slot is empty, and every
 // path in the component checks that before touching the bus.
+// Poll intervals, editable at runtime. The meter feeds every control cycle, so
+// its rate is the one most likely to need changing while watching the bus.
+class GrowattMeterIntervalNumber : public number::Number {
+ public:
+  void set_parent(GrowattMeter *p) { this->parent_ = p; }
+  void set_is_slow(bool v) { this->is_slow_ = v; }
+
+ protected:
+  void control(float value) override;
+  GrowattMeter *parent_{nullptr};
+  bool is_slow_{false};
+};
+
 class GrowattMeterAddressNumber : public number::Number {
  public:
   void set_parent(GrowattMeter *p) { this->parent_ = p; }

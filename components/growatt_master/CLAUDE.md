@@ -12,10 +12,11 @@ real inverters.
 ## What the component is
 
 An ESPHome external component that replaces a Growatt ShineMaster: it manages
-several Growatt inverters and Eastron smart meters on one Modbus RTU bus, and
-runs a self-consumption controller that keeps the property from exporting.
+several Growatt inverters and Eastron smart meters over Modbus RTU - on one bus
+or on two, one per device family - and runs a self-consumption controller that
+keeps the property from exporting.
 
-Development hardware, all on one RS485 bus at 9600 baud:
+Development hardware, at 9600 baud:
 
 | Unit | Model | DTC | Notes |
 |---|---|---|---|
@@ -299,7 +300,53 @@ The tool cannot fix the case that most often creates the need for it. Two units
 sharing a factory default address cannot be told apart, so neither can be
 addressed individually. The only way out is one device on the bus at a time.
 
+## Persistence
+
+Three structures, one per class, each under its own key: `growatt_hub_settings`
+holds the thresholds and the offline action, `growatt_slot_N` the address, phase
+and string overrides, wiring and safe rate, and `growatt_meter_N` the address
+and model. Nothing else is stored.
+
+Every one of them starts with a version byte and ends with reserved space, and
+that is not decoration. ESPHome keys a preference by type, so changing `sizeof`
+makes `load()` fail wholesale - not "the new field takes its default" but "every
+stored value is lost, including the addresses, which no longer have a YAML
+fallback". Adding a field therefore means spending reserved bytes, never
+extending the structure. The version byte covers the other case: a field whose
+size is unchanged but whose meaning is not. Bump `PREFS_VERSION` then, and every
+device falls back to its configured defaults with a warning rather than
+misreading old data.
+
+An earlier version of this component bolted new settings on as separate
+preference keys precisely to dodge the size problem. That works, but it scatters
+one device's state across several keys and the reason is invisible at the call
+site. The reserved block is the same idea made explicit.
+
 ## Configuration that lives in entities, not YAML
+
+Almost all tuning is a runtime entity now, not a compile time option. The
+reasoning is the same one that produced the register dump button: the loop of
+guess a value, flash, watch, guess again is slow enough that it discourages
+tuning at all, and a controller nobody tunes is worse than one with an awkward
+setting. YAML supplies the starting point; flash wins after that.
+
+On the hub that is the whole of `settings:` - thresholds, gains, steps,
+intervals, timeouts, margins. The mechanism was already there for the voltage
+and SOC thresholds; the tunables just joined the same table, which is why they
+persist and publish without any new code. The one wrinkle is that the
+thresholds are read out of `values_` where they are used, while the tunables are
+held in members the control path reads every pass, so `apply_setting_()` pushes
+a change into the member. `update_interval` needs more than that: a
+`PollingComponent` will not notice a new interval, so the poller is stopped,
+retimed and started again.
+
+Per inverter: min and max power rate, safe rate, both poll intervals, voltage
+convention, automatic protection limits, EEPROM setting memory. Per meter: both
+poll intervals. Changing a bound applies it immediately if the current setpoint
+falls outside it, because a bound that does not contain the setpoint is not a
+bound. Changing the voltage convention or turning automatic protection on
+clears `protection_applied_`, so the trip thresholds go out again in the new
+terms rather than at the next identification.
 
 Three things are exposed as entities rather than fixed values, and all three
 are persisted in flash, which wins over anything the configuration says:
@@ -319,9 +366,11 @@ it looks authoritative.
 
 ## Health, presence and probing
 
-Everything shares one bus, so the inverters use the same idea of "stalled" and
-"offline" as the meter does, pushed down from the hub: online under 10 s,
-stalled under 20 s, offline beyond that.
+Inverters and meters use the same idea of "stalled" and "offline", pushed down
+from the hub: online under 10 s, stalled under 20 s, offline beyond that. Not
+because they share a bus - they may not - but because the question being asked
+is the same one, and a second set of timeouts would be two things to tune where
+one will do.
 
 Offline is not just a label. A model without storage simply shuts down when the
 panels go dark, and each pointless query then costs more bus time in timeouts
@@ -353,7 +402,23 @@ Order of business in one cycle:
    impossible and the house needs everything, so every inverter goes to
    `offgrid_power_rate` (default 100 %).
 2. **Meter offline** — while connected to the mains we can no longer tell
-   whether we are exporting, so production is stopped outright.
+   whether we are exporting. What to do about that is a judgement the site
+   owner has to make, so `meter_offline_action` offers three:
+
+   - **Stop** puts everything to zero. Safe for an export limited site and the
+     default, but a comms fault at midday throws away real production.
+   - **Hold** keeps the last setpoints. Right where the site imports far more
+     than it generates, since the previous setpoints could not have been
+     exporting either. Wrong if load can vanish while the meter is away.
+   - **Hold then reduce** holds for `meter_offline_hold`, then walks each
+     inverter down by `min_step` per cycle to its own `safe_power_rate`. Most
+     outages are brief, and a stepwise descent means little is lost if the
+     meter returns mid-way.
+
+   `safe_power_rate` is per inverter and editable. Raising it above what a unit
+   is currently doing applies immediately, since the point of raising it is to
+   get production back; lowering it does not, because that would cut output
+   while the meter is healthy.
 3. **Meter stalled** — a few missed frames are not a reason to move anything.
    Hold.
 4. **Above the contractual export cap** (`grid_export_limit`, 0 disables) —
@@ -502,9 +567,15 @@ At 9600 baud a byte is 1.04 ms and a response costs about
 `(3 + 2 × registers + 2) × 1.04` ms.
 
 Reads are split into a fast cycle carrying only what the controller needs and a
-slow cycle for counters and diagnostics, on a separate `slow_update_interval`
-(default 30 s). Fast blocks per inverter: input 0-56, input 101-105, plus input
-1009-1014 and 1067-1081 on storage units.
+slow cycle for counters and diagnostics, on a separate slow interval (default
+30 s). Both are editable per device at runtime. Fast blocks per inverter: input
+0-56, input 101-105, plus input 1009-1014 and 1067-1081 on storage units.
+
+The figures below describe one bus. Splitting the meter onto its own removes it
+from this budget entirely, which is most of the point: it is polled far more
+often than the inverters and it is the one reading the controller cannot work
+without. Each bus also gets its own `send_wait_time` and `turnaround_time`, so
+the meter no longer has to wait out settings chosen for the slowest inverter.
 
 `turnaround_time` in the modbus component applies to every transaction
 regardless of size and dominates the budget. Four devices at 450 ms saturate
@@ -514,7 +585,8 @@ character silence the standard requires.
 `BUS_YIELD_MS` (15 ms, matched in the meter) is a short pause a device takes
 after its own transaction. Without it, the component registered first would
 chain its blocks back to back and starve the others, because ESPHome runs
-`loop()` in registration order.
+`loop()` in registration order. It costs nothing on a bus with one device, so it
+is not conditional on how the buses are split.
 
 The response timeout is 1.5 s with two retries, per the document's note that
 commands should be at least 850 ms apart.

@@ -342,6 +342,7 @@ enum VoltageConvention : uint8_t {
   CONV_AUTO = 0,
   CONV_PHASE,
   CONV_LINE,
+  CONV_MODE_COUNT,
 };
 
 // Health of one inverter. Some models shut down completely when the panels go
@@ -375,11 +376,23 @@ struct GrowattCaps {
 // Persisted per slot. The component is the single source of truth for these,
 // so UI entities read them back instead of keeping their own copy.
 // The YAML values act as defaults for the very first boot only.
+// See PREFS_VERSION in growatt_master.h for the versioning and reserved space
+// convention these structures follow.
 struct GrowattSlotPrefs {
+  uint8_t version;
   uint8_t address;
   int8_t cfg_phases;
   int8_t cfg_strings;
   uint8_t phase;  // InvPhase, single phase inverters only
+  uint8_t safe_power_rate;
+  uint8_t min_power_rate;
+  uint8_t max_power_rate;
+  uint8_t convention;         // ConvMode
+  uint8_t auto_protection;
+  uint8_t protect_eeprom;
+  uint16_t update_interval;   // seconds
+  uint16_t slow_interval;     // seconds
+  uint8_t reserved[12];
 } __attribute__((packed));
 
 // Voltage / current / power triple, reused for grid phases, PV strings and
@@ -480,7 +493,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   }
 
   // Health, and the timeouts that define it. The hub passes down the same
-  // values it uses for the meter, since everything shares one bus.
+  // values it uses for the meter: the same question, asked once.
   uint8_t health() const { return this->health_; }
   bool is_online() const { return this->health_ == INV_ONLINE; }
   const char *health_text() const;
@@ -503,8 +516,32 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // ------------------------------ controller API ------------------------------
   // Bounds the controller must stay inside. Setting both to the same value
   // effectively takes this inverter out of automatic control.
+  // Where this unit is parked when the meter has been gone long enough that
+  // holding the last setpoint stops being prudent. Editable, and persisted
+  // under its own preference key so adding it cannot invalidate the stored
+  // addresses.
+  void set_safe_power_rate(uint8_t v) { this->safe_power_rate_ = v; }
+  uint8_t get_safe_power_rate() const { return this->safe_power_rate_; }
+  void apply_safe_power_rate(float v);
+  void set_safe_rate_number(number::Number *n) { this->safe_rate_num_ = n; }
   void set_min_power_rate(uint8_t v) { this->min_power_rate_ = v; }
   void set_max_power_rate(uint8_t v) { this->max_power_rate_ = v; }
+  // Runtime edits. Each stores, persists, and where it matters takes effect at
+  // once rather than at the next identification.
+  void apply_min_power_rate(float v);
+  void apply_max_power_rate(float v);
+  void apply_update_interval(float seconds);
+  void apply_slow_interval(float seconds);
+  void apply_convention(uint8_t c);
+  void apply_auto_protection(bool on);
+  void apply_protect_eeprom(bool on);
+  void set_min_rate_number(number::Number *n) { this->min_rate_num_ = n; }
+  void set_max_rate_number(number::Number *n) { this->max_rate_num_ = n; }
+  void set_update_number(number::Number *n) { this->update_num_ = n; }
+  void set_slow_number(number::Number *n) { this->slow_num_ = n; }
+  void set_convention_select(select::Select *s) { this->convention_select_ = s; }
+  void set_auto_protection_switch(switch_::Switch *s) { this->auto_prot_sw_ = s; }
+  void set_protect_eeprom_switch(switch_::Switch *s) { this->eeprom_sw_ = s; }
   uint8_t get_min_power_rate() const { return this->min_power_rate_; }
   uint8_t get_max_power_rate() const { return this->max_power_rate_; }
 
@@ -771,6 +808,15 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint32_t bus_release_{0};
   uint8_t retries_{0};
   uint8_t power_percent_{0};
+  uint8_t safe_power_rate_{0};
+  number::Number *safe_rate_num_{nullptr};
+  number::Number *min_rate_num_{nullptr};
+  number::Number *max_rate_num_{nullptr};
+  number::Number *update_num_{nullptr};
+  number::Number *slow_num_{nullptr};
+  select::Select *convention_select_{nullptr};
+  switch_::Switch *auto_prot_sw_{nullptr};
+  switch_::Switch *eeprom_sw_{nullptr};
   uint8_t min_power_rate_{0};
   uint8_t max_power_rate_{100};
   uint16_t real_percent_val_{0};
@@ -1157,6 +1203,56 @@ class GrowattDumpButton : public button::Button {
   void press_action() override {
     if (this->parent_ != nullptr)
       this->parent_->start_dump();
+  }
+  GrowattInverter *parent_{nullptr};
+};
+
+// Runtime editable inverter settings. All of them were compile time options,
+// and all of them are things a person ends up wanting to change while watching
+// the log rather than between flashes.
+class GrowattRateNumber : public number::Number {
+ public:
+  void set_parent(GrowattInverter *p) { this->parent_ = p; }
+  void set_kind(uint8_t k) { this->kind_ = k; }
+
+ protected:
+  void control(float value) override;
+  GrowattInverter *parent_{nullptr};
+  uint8_t kind_{0};
+};
+
+class GrowattConventionSelect : public select::Select {
+ public:
+  void set_parent(GrowattInverter *p) { this->parent_ = p; }
+
+ protected:
+  void control(const std::string &value) override;
+  GrowattInverter *parent_{nullptr};
+};
+
+class GrowattInverterOptionSwitch : public switch_::Switch {
+ public:
+  void set_parent(GrowattInverter *p) { this->parent_ = p; }
+  void set_is_eeprom(bool v) { this->is_eeprom_ = v; }
+
+ protected:
+  void write_state(bool state) override;
+  GrowattInverter *parent_{nullptr};
+  bool is_eeprom_{false};
+};
+
+// The rate this inverter falls back to when the meter is long gone. Raising it
+// above what the unit is doing now takes effect immediately, because the point
+// of raising it is to get production back.
+class GrowattSafeRateNumber : public number::Number {
+ public:
+  void set_parent(GrowattInverter *p) { this->parent_ = p; }
+
+ protected:
+  void control(float value) override {
+    this->publish_state(value);
+    if (this->parent_ != nullptr)
+      this->parent_->apply_safe_power_rate(value);
   }
   GrowattInverter *parent_{nullptr};
 };

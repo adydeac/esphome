@@ -59,11 +59,20 @@ void GrowattMeter::setup() {
 
   MeterPrefs p{};
   if (this->pref_.load(&p)) {
-    this->address_ = p.address;
-    this->model_ = (p.model < METER_MODEL_COUNT) ? p.model
-                                                 : (uint8_t) METER_AUTO;
-    ESP_LOGI(TAG, "meter %u: restored addr=%u model=%s", this->slot_index_,
-             p.address, MODEL_NAMES[this->model_]);
+    if (p.version == PREFS_VERSION) {
+      this->address_ = p.address;
+      this->model_ = (p.model < METER_MODEL_COUNT) ? p.model
+                                                   : (uint8_t) METER_AUTO;
+      if (p.update_interval > 0)
+        this->set_update_interval((uint32_t) p.update_interval * 1000);
+      if (p.slow_interval > 0)
+        this->slow_interval_ = (uint32_t) p.slow_interval * 1000;
+      ESP_LOGI(TAG, "meter %u: restored addr=%u model=%s", this->slot_index_,
+               p.address, MODEL_NAMES[this->model_]);
+    } else {
+      ESP_LOGW(TAG, "meter %u: stored settings are version %u, expected %u - "
+               "using defaults", this->slot_index_, p.version, PREFS_VERSION);
+    }
   }
 
   this->publish_cfg_entities_();
@@ -77,15 +86,57 @@ void GrowattMeter::setup() {
            this->slot_index_, this->address_);
 }
 
+void GrowattMeter::apply_update_interval(float seconds) {
+  uint32_t ms = (uint32_t) (seconds * 1000.0f);
+  if (ms < 200)
+    return;
+  // A PollingComponent does not notice a new interval by itself.
+  this->stop_poller();
+  this->set_update_interval(ms);
+  this->start_poller();
+  this->save_prefs_();
+  ESP_LOGI(TAG, "meter %u: poll interval %u ms", this->slot_index_,
+           (unsigned) ms);
+}
+
+void GrowattMeter::apply_slow_interval(float seconds) {
+  uint32_t ms = (uint32_t) (seconds * 1000.0f);
+  if (ms < 1000)
+    return;
+  this->slow_interval_ = ms;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "meter %u: slow block interval %u ms", this->slot_index_,
+           (unsigned) ms);
+}
+
+void GrowattMeterIntervalNumber::control(float value) {
+  this->publish_state(value);
+  if (this->parent_ == nullptr)
+    return;
+  if (this->is_slow_)
+    this->parent_->apply_slow_interval(value);
+  else
+    this->parent_->apply_update_interval(value);
+}
+
 void GrowattMeter::publish_cfg_entities_() {
   if (this->address_num_ != nullptr)
     this->address_num_->publish_state(this->address_);
+  if (this->update_num_ != nullptr)
+    this->update_num_->publish_state(this->get_update_interval() / 1000.0f);
+  if (this->slow_num_ != nullptr)
+    this->slow_num_->publish_state(this->slow_interval_ / 1000.0f);
   if (this->model_select_ != nullptr)
     this->model_select_->publish_state(MODEL_NAMES[this->model_]);
 }
 
 void GrowattMeter::save_prefs_() {
-  MeterPrefs p{this->address_, this->model_};
+  MeterPrefs p{};
+  p.version = PREFS_VERSION;
+  p.address = this->address_;
+  p.model = this->model_;
+  p.update_interval = (uint16_t) (this->get_update_interval() / 1000);
+  p.slow_interval = (uint16_t) (this->slow_interval_ / 1000);
   this->pref_.save(&p);
 }
 

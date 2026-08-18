@@ -1,0 +1,637 @@
+# =============================================================================
+# growatt_master - every option the component accepts.
+#
+# Almost nothing here is required. The point of the file is to show what exists;
+# a real configuration declares the handful of entities it actually wants, since
+# every one of them costs RAM on the ESP and a row in Home Assistant.
+#
+# Two things did change shape and are worth reading before copying:
+#
+#   'address' is now an entity, not a value, and it is required. It lives in
+#   flash, so YAML has no say after the first boot - the entity is the only way
+#   to set it. A device left at 0 is treated as an empty slot and never touched.
+#
+#   Most controller tuning moved from here into 'settings:'. Those are numbers
+#   you can turn while watching the log instead of between flashes; the value in
+#   YAML is only the starting point, and flash wins after that.
+# =============================================================================
+
+uart:
+  - id: uart_inverters
+    tx_pin: GPIO17
+    rx_pin: GPIO16
+    baud_rate: 9600
+    stop_bits: 1
+  - id: uart_meters
+    tx_pin: GPIO19
+    rx_pin: GPIO18
+    baud_rate: 9600
+    stop_bits: 1
+
+modbus:
+  - id: bus_inverters
+    uart_id: uart_inverters
+    send_wait_time: 500ms
+    # Applies to every transaction regardless of size and dominates the budget.
+    # 50ms is comfortable and still far above the 3.5 character silence the
+    # standard asks for.
+    turnaround_time: 100ms
+  - id: bus_meters
+    uart_id: uart_meters
+    send_wait_time: 500ms
+    turnaround_time: 100ms
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+growatt_master:
+  id: growatt_hub
+
+  # One bus for everything, or one per device type. 'modbus_id' alone keeps the
+  # old single bus behaviour; naming either of the specific ones splits them,
+  # and whichever is missing falls back to 'modbus_id'.
+  inverters_modbus_id: bus_inverters
+  meters_modbus_id: bus_meters
+  # modbus_id: bus_inverters
+
+  # Slots are allocated at compile time, so this has to cover every inverter
+  # that might ever be declared - not just the ones present today.
+  max_inverters: 5
+
+  # How long to keep holding the last setpoints once the meter is gone, before
+  # 'Hold then reduce' starts walking each inverter down to its safe rate.
+  meter_offline_hold: 5min
+
+  # Grid presence from an external contactor. Without one the mains is assumed
+  # to be always available, and the controller will never enter off grid mode.
+  grid_power_source: mains_contactor
+
+  # --- editable settings ------------------------------------------------
+  # Persisted in flash. The value here is the starting point only.
+  settings:
+    grid_phase_voltage_low:
+      name: "Hub Grid Phase Voltage Low"
+    grid_phase_voltage_high:
+      name: "Hub Grid Phase Voltage High"
+    grid_line_voltage_low:
+      name: "Hub Grid Line Voltage Low"
+    grid_line_voltage_high:
+      name: "Hub Grid Line Voltage High"
+    ups_max_load:
+      name: "Hub Ups Max Load"
+    ups_max_load_avg:
+      name: "Hub Ups Max Load Avg"
+    battery_soc_min:
+      name: "Hub Battery Soc Min"
+    battery_soc_max:
+      name: "Hub Battery Soc Max"
+    grid_export_limit:
+      name: "Hub Grid Export Limit"
+    update_interval:
+      name: "Hub Update Interval"
+    step_interval:
+      name: "Hub Step Interval"
+    refresh_interval:
+      name: "Hub Refresh Interval"
+    average_samples:
+      name: "Hub Average Samples"
+    device_stalled_timeout:
+      name: "Hub Device Stalled Timeout"
+    device_offline_timeout:
+      name: "Hub Device Offline Timeout"
+    device_offline_probe_interval:
+      name: "Hub Device Offline Probe Interval"
+    import_threshold:
+      name: "Hub Import Threshold"
+    export_threshold:
+      name: "Hub Export Threshold"
+    increase_gain:
+      name: "Hub Increase Gain"
+    decrease_gain:
+      name: "Hub Decrease Gain"
+    min_step:
+      name: "Hub Min Step"
+    max_step:
+      name: "Hub Max Step"
+    startup_power_rate:
+      name: "Hub Startup Power Rate"
+    offgrid_power_rate:
+      name: "Hub Offgrid Power Rate"
+    inverter_protection_margin:
+      name: "Hub Inverter Protection Margin"
+    inverter_restart_delay:
+      name: "Hub Inverter Restart Delay"
+    grid_voltage_soft_margin:
+      name: "Hub Grid Voltage Soft Margin"
+
+  # --- derived conditions -----------------------------------------------
+  # Each follows from a threshold above, so the number is written once.
+  binary_sensors:
+    grid_power:
+      name: "Grid Grid Power"
+    grid_over_voltage:
+      name: "Grid Grid Over Voltage"
+    grid_under_voltage:
+      name: "Grid Grid Under Voltage"
+    ups_overloaded:
+      name: "Grid Ups Overloaded"
+    ups_overloaded_average:
+      name: "Grid Ups Overloaded Average"
+    battery_below_min:
+      name: "Grid Battery Below Min"
+    battery_above_max:
+      name: "Grid Battery Above Max"
+
+  # --- aggregates -------------------------------------------------------
+  # Import and export are summed separately across phases: with no netting at
+  # the meter, +500 W on L1 and -300 W on L2 is billed as 500 W drawn and 300 W
+  # given away, not 200 W net.
+  meter_import:
+    name: "Grid Import"
+  meter_export:
+    name: "Grid Export"
+  meter_import_average:
+    name: "Grid Import Average"
+  meter_export_average:
+    name: "Grid Export Average"
+  meter_state:
+    name: "Meter State"
+  controller_state:
+    name: "Controller State"
+
+  # --- what to do when the meter is gone ---------------------------------
+  # Stop / Hold / Hold then reduce. Stopping is safe for an export limited
+  # site and expensive during a comms fault; the other two trade some of that
+  # safety for keeping production up.
+  meter_offline_action:
+    name: "Meter Offline Action"
+
+  # --- commissioning tools ------------------------------------------------
+  # Bus level, unrelated to the devices declared below: for a unit that is not
+  # in the configuration yet, or one on a clashing address. Both fields start
+  # at 0 - the broadcast address - so a stray press does nothing.
+  change_inverter_address:
+    name: "Change Inverter Address"
+  change_inverter_address_from:
+    name: "Change Inverter Address From"
+    mode: box
+  change_inverter_address_to:
+    name: "Change Inverter Address To"
+    mode: box
+  change_inverter_address_status:
+    name: "Change Inverter Address Status"
+  change_meter_address:
+    name: "Change Meter Address"
+  change_meter_address_from:
+    name: "Change Meter Address From"
+    mode: box
+  change_meter_address_to:
+    name: "Change Meter Address To"
+    mode: box
+  change_meter_address_status:
+    name: "Change Meter Address Status"
+
+  # =====================================================================
+  # Inverters. Order is the controller's priority order: increases walk the
+  # list forwards, reductions walk it backwards, so the last declared unit is
+  # the first to give way.
+  # =====================================================================
+  inverters:
+    - # Required. Persisted, so this entity is the only way to set the address
+      # after the first boot. 0 means the slot is empty and is never polled.
+      address:
+        name: "Growatt01 Address"
+        mode: box
+
+      # Bus override, for the odd unit on the other line.
+      # modbus_id: bus_meters
+
+      # Which grid phase a single phase unit feeds. Ignored on three phase
+      # units, where it is detected instead.
+      phase: L1
+
+      # Starting points for the overrides below. Detection handles both when
+      # left at 0, which is right whenever the unit is on grid and can simply
+      # be measured.
+      phases: 0
+      strings: 0
+
+      # Hardware constants. The defaults match the development hardware.
+      battery_module_voltage: 53.75
+      battery_module_capacity: 5.12
+      battery_discharge_hours: 2.0
+      ups_load_average_samples: 60
+
+      # Output below which the per phase power registers cannot be judged.
+      # Some units report their whole output in Pac1 and leave the rest at
+      # zero; that is detected from live data, but only above this figure.
+      phase_power_detect_threshold: 100
+
+      # --- editable settings ---------------------------------------------
+      min_power_rate:
+        name: "Growatt01 Min Power Rate"
+      max_power_rate:
+        name: "Growatt01 Max Power Rate"
+      safe_power_rate:
+        name: "Growatt01 Safe Power Rate"
+      update_interval_number:
+        name: "Growatt01 Poll Interval"
+      slow_update_interval_number:
+        name: "Growatt01 Slow Poll Interval"
+      voltage_convention_select:
+        name: "Growatt01 Voltage Convention"
+      auto_protection_limits_switch:
+        name: "Growatt01 Auto Protection Limits"
+      protect_eeprom_switch:
+        name: "Growatt01 Protect EEPROM"
+
+      # Capability overrides. "Auto" hands the decision back to detection.
+      phase_count:
+        name: "Growatt01 Phases"
+      pv_strings:
+        name: "Growatt01 PV Strings"
+
+      # Sweeps holding and input at 0, 1000, 3000 and the VPP areas at 30000
+      # and 30400, and prints them in a format that pastes into an issue.
+      dump_registers:
+        name: "Growatt01 Dump Registers"
+      refresh:
+        name: "Growatt01 Refresh"
+
+      # --- sensors
+      sensors:
+        status_code:
+          name: "Growatt01 Status Code"
+        pv_active_power:
+          name: "Growatt01 Pv Active Power"
+        grid_active_power:
+          name: "Growatt01 Grid Active Power"
+        energy_today:
+          name: "Growatt01 Energy Today"
+        energy_total:
+          name: "Growatt01 Energy Total"
+        work_time_total:
+          name: "Growatt01 Work Time Total"
+        pv_energy_total:
+          name: "Growatt01 Pv Energy Total"
+        ipm_temperature:
+          name: "Growatt01 Ipm Temperature"
+        boost_temperature:
+          name: "Growatt01 Boost Temperature"
+        battery_voltage_dsp:
+          name: "Growatt01 Battery Voltage Dsp"
+        bus_voltage_p:
+          name: "Growatt01 Bus Voltage P"
+        bus_voltage_n:
+          name: "Growatt01 Bus Voltage N"
+        output_power_factor:
+          name: "Growatt01 Output Power Factor"
+        real_power_percent:
+          name: "Growatt01 Real Power Percent"
+        output_max_power:
+          name: "Growatt01 Output Max Power"
+        derating_mode:
+          name: "Growatt01 Derating Mode"
+        fault_code:
+          name: "Growatt01 Fault Code"
+        fault_subcode:
+          name: "Growatt01 Fault Subcode"
+        warning_bits:
+          name: "Growatt01 Warning Bits"
+        warning_subcode:
+          name: "Growatt01 Warning Subcode"
+        warning_code:
+          name: "Growatt01 Warning Code"
+        normal_power:
+          name: "Growatt01 Normal Power"
+        modbus_version:
+          name: "Growatt01 Modbus Version"
+        active_rate:
+          name: "Growatt01 Active Rate"
+        reactive_rate:
+          name: "Growatt01 Reactive Rate"
+        power_factor_set:
+          name: "Growatt01 Power Factor Set"
+        pv_nominal_voltage:
+          name: "Growatt01 Pv Nominal Voltage"
+        com_address:
+          name: "Growatt01 Com Address"
+        pf_model:
+          name: "Growatt01 Pf Model"
+        tracker_model:
+          name: "Growatt01 Tracker Model"
+        system_work_mode:
+          name: "Growatt01 System Work Mode"
+        fault_word:
+          name: "Growatt01 Fault Word"
+        battery_voltage:
+          name: "Growatt01 Battery Voltage"
+        battery_soc:
+          name: "Growatt01 Battery Soc"
+        battery_charge_power:
+          name: "Growatt01 Battery Charge Power"
+        battery_discharge_power:
+          name: "Growatt01 Battery Discharge Power"
+        battery_capacity:
+          name: "Growatt01 Battery Capacity"
+        battery_cycles:
+          name: "Growatt01 Battery Cycles"
+        battery_health:
+          name: "Growatt01 Battery Health"
+        battery_temperature:
+          name: "Growatt01 Battery Temperature"
+        charge_energy_today:
+          name: "Growatt01 Charge Energy Today"
+        charge_energy_total:
+          name: "Growatt01 Charge Energy Total"
+        discharge_energy_today:
+          name: "Growatt01 Discharge Energy Today"
+        discharge_energy_total:
+          name: "Growatt01 Discharge Energy Total"
+        ac_charge_energy_today:
+          name: "Growatt01 Ac Charge Energy Today"
+        ac_charge_energy_total:
+          name: "Growatt01 Ac Charge Energy Total"
+        ac_charge_power:
+          name: "Growatt01 Ac Charge Power"
+        priority:
+          name: "Growatt01 Priority"
+        battery_type:
+          name: "Growatt01 Battery Type"
+        power_to_user:
+          name: "Growatt01 Power To User"
+        power_to_grid:
+          name: "Growatt01 Power To Grid"
+        local_load_power:
+          name: "Growatt01 Local Load Power"
+        energy_to_user_today:
+          name: "Growatt01 Energy To User Today"
+        energy_to_user_total:
+          name: "Growatt01 Energy To User Total"
+        energy_to_grid_today:
+          name: "Growatt01 Energy To Grid Today"
+        energy_to_grid_total:
+          name: "Growatt01 Energy To Grid Total"
+        local_load_energy_today:
+          name: "Growatt01 Local Load Energy Today"
+        local_load_energy_total:
+          name: "Growatt01 Local Load Energy Total"
+        ups_frequency:
+          name: "Growatt01 Ups Frequency"
+        ups_load:
+          name: "Growatt01 Ups Load"
+        ups_power_factor:
+          name: "Growatt01 Ups Power Factor"
+        bms_soc:
+          name: "Growatt01 Bms Soc"
+        bms_voltage:
+          name: "Growatt01 Bms Voltage"
+        bms_current:
+          name: "Growatt01 Bms Current"
+        bms_temperature:
+          name: "Growatt01 Bms Temperature"
+        ups_total_power:
+          name: "Growatt01 Ups Total Power"
+        ups_load_average:
+          name: "Growatt01 Ups Load Average"
+        ups_max_power:
+          name: "Growatt01 Ups Max Power"
+        battery_modules:
+          name: "Growatt01 Battery Modules"
+
+      # --- text sensors
+      text_sensors:
+        firmware:
+          name: "Growatt01 Firmware"
+        firmware_build:
+          name: "Growatt01 Firmware Build"
+        serial_number:
+          name: "Growatt01 Serial Number"
+        manufacturer:
+          name: "Growatt01 Manufacturer"
+        model:
+          name: "Growatt01 Model"
+        bootloader:
+          name: "Growatt01 Bootloader"
+        system_time:
+          name: "Growatt01 System Time"
+        status:
+          name: "Growatt01 Status"
+        fault:
+          name: "Growatt01 Fault"
+        derating:
+          name: "Growatt01 Derating"
+        state:
+          name: "Growatt01 State"
+
+      # --- register backed settings, written straight to the inverter
+      settings:
+        active_power_rate:
+          name: "Growatt01 Active Power Rate"
+        grid_first_discharge_rate:
+          name: "Growatt01 Grid First Discharge Rate"
+        grid_first_stop_soc:
+          name: "Growatt01 Grid First Stop Soc"
+        battery_first_charge_rate:
+          name: "Growatt01 Battery First Charge Rate"
+        battery_first_stop_soc:
+          name: "Growatt01 Battery First Stop Soc"
+        pv_start_voltage:
+          name: "Growatt01 Pv Start Voltage"
+        start_time:
+          name: "Growatt01 Start Time"
+        restart_delay:
+          name: "Growatt01 Restart Delay"
+        grid_voltage_low:
+          name: "Growatt01 Grid Voltage Low"
+        grid_voltage_high:
+          name: "Growatt01 Grid Voltage High"
+        grid_frequency_low:
+          name: "Growatt01 Grid Frequency Low"
+        grid_frequency_high:
+          name: "Growatt01 Grid Frequency High"
+        export_limit_rate:
+          name: "Growatt01 Export Limit Rate"
+
+      # --- register backed switches
+      switches:
+        setting_memory:
+          name: "Growatt01 Setting Memory"
+        inverter_power:
+          name: "Growatt01 Inverter Power"
+        bdc_power:
+          name: "Growatt01 Bdc Power"
+        ups_enable:
+          name: "Growatt01 Ups Enable"
+
+      # --- per phase AC values
+      phases:
+        - voltage:
+            name: "Growatt01 L1 Voltage"
+          current:
+            name: "Growatt01 L1 Current"
+          power:
+            name: "Growatt01 L1 Power"
+        - voltage:
+            name: "Growatt01 L2 Voltage"
+          current:
+            name: "Growatt01 L2 Current"
+          power:
+            name: "Growatt01 L2 Power"
+        - voltage:
+            name: "Growatt01 L3 Voltage"
+          current:
+            name: "Growatt01 L3 Current"
+          power:
+            name: "Growatt01 L3 Power"
+
+      # Line to line, populated by units that report both.
+      line_voltages:
+        - name: "Growatt01 L1-L2 Voltage"
+        - name: "Growatt01 L2-L3 Voltage"
+        - name: "Growatt01 L3-L1 Voltage"
+
+      # --- per string PV values
+      strings:
+        - voltage:
+            name: "Growatt01 PV1 Voltage"
+          current:
+            name: "Growatt01 PV1 Current"
+          power:
+            name: "Growatt01 PV1 Power"
+
+      # --- time windows. Written atomically; the firmware rejects a Grid First
+      # period that overlaps an enabled Battery First one, and windows may wrap
+      # past midnight.
+      grid_first:
+        - enabled:
+            name: "Growatt01 Grid First 1"
+          start_hour:
+            name: "Growatt01 Grid First 1 Start Hour"
+          start_minute:
+            name: "Growatt01 Grid First 1 Start Minute"
+          stop_hour:
+            name: "Growatt01 Grid First 1 Stop Hour"
+          stop_minute:
+            name: "Growatt01 Grid First 1 Stop Minute"
+      battery_first:
+        - enabled:
+            name: "Growatt01 Battery First 1"
+          start_hour:
+            name: "Growatt01 Battery First 1 Start Hour"
+          start_minute:
+            name: "Growatt01 Battery First 1 Start Minute"
+          stop_hour:
+            name: "Growatt01 Battery First 1 Stop Hour"
+          stop_minute:
+            name: "Growatt01 Battery First 1 Stop Minute"
+      ac_charge:
+        name: "Growatt01 AC Charge"
+
+    # A second inverter, showing only what a real configuration usually needs.
+    - address:
+        name: "Growatt02 Address"
+        mode: box
+      phase: L2
+      max_power_rate:
+        name: "Growatt02 Max Power Rate"
+      safe_power_rate:
+        name: "Growatt02 Safe Power Rate"
+      sensors:
+        grid_active_power:
+          name: "Growatt02 Grid Active Power"
+        battery_soc:
+          name: "Growatt02 Battery SOC"
+
+  # =====================================================================
+  # Meters. The first one declared is the grid reference: it is what the
+  # controller works from and what the voltage checks are judged against.
+  # =====================================================================
+  meters:
+    - address:
+        name: "Grid Meter Address"
+        mode: box
+      # modbus_id: bus_inverters
+      update_interval_number:
+        name: "Grid Meter Poll Interval"
+      slow_update_interval_number:
+        name: "Grid Meter Slow Poll Interval"
+      # All Eastron meters share one register map, so this is an override
+      # rather than something the map can reveal. "Auto" leaves the phase
+      # count to detection.
+      model_select:
+        name: "Grid Meter Model"
+      info:
+        name: "Grid Meter Info"
+
+      sensors:
+        total_active_power:
+          name: "Grid Total Active Power"
+        total_apparent_power:
+          name: "Grid Total Apparent Power"
+        total_reactive_power:
+          name: "Grid Total Reactive Power"
+        total_power_factor:
+          name: "Grid Total Power Factor"
+        average_voltage:
+          name: "Grid Average Voltage"
+        average_current:
+          name: "Grid Average Current"
+        sum_current:
+          name: "Grid Sum Current"
+        import_active_energy:
+          name: "Grid Import Active Energy"
+        export_active_energy:
+          name: "Grid Export Active Energy"
+        import_reactive_energy:
+          name: "Grid Import Reactive Energy"
+        export_reactive_energy:
+          name: "Grid Export Reactive Energy"
+        average_line_voltage:
+          name: "Grid Average Line Voltage"
+        neutral_current:
+          name: "Grid Neutral Current"
+        total_active_energy:
+          name: "Grid Total Active Energy"
+        total_reactive_energy:
+          name: "Grid Total Reactive Energy"
+
+      phases:
+        - voltage:
+            name: "Grid L1 Voltage"
+          current:
+            name: "Grid L1 Current"
+          active_power:
+            name: "Grid L1 Power"
+          apparent_power:
+            name: "Grid L1 Apparent Power"
+          reactive_power:
+            name: "Grid L1 Reactive Power"
+          power_factor:
+            name: "Grid L1 Power Factor"
+        - voltage:
+            name: "Grid L2 Voltage"
+          active_power:
+            name: "Grid L2 Power"
+        - voltage:
+            name: "Grid L3 Voltage"
+          active_power:
+            name: "Grid L3 Power"
+
+      # Only requested when at least one of these is declared, because the
+      # block costs a Modbus transaction of its own.
+      line_voltages:
+        - name: "Grid L1-L2 Voltage"
+        - name: "Grid L2-L3 Voltage"
+        - name: "Grid L3-L1 Voltage"
+
+binary_sensor:
+  - platform: gpio
+    id: mains_contactor
+    pin:
+      number: GPIO23
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Mains Contactor"

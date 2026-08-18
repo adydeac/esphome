@@ -11,6 +11,11 @@ namespace growatt_master {
 
 static const char *const TAG = "growatt_master";
 
+// Must match OFFLINE_ACTIONS in __init__.py.
+static const char *const OFFLINE_ACTIONS[OFF_ACTION_COUNT] = {
+    "Stop", "Hold", "Hold then reduce"};
+
+
 static const char *health_text(uint8_t h) {
   switch (h) {
     case METER_ONLINE: return "online";
@@ -23,16 +28,31 @@ void GrowattHub::setup() {
   uint32_t hash = fnv1_hash("growatt_hub_settings");
   this->pref_ = global_preferences->make_preference<GrowattHubPrefs>(hash);
 
+
   GrowattHubPrefs p{};
   if (this->pref_.load(&p)) {
-    for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
-      this->values_[i] = p.values[i];
-    ESP_LOGI(TAG, "restored thresholds from flash");
+    if (p.version == PREFS_VERSION) {
+      for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
+        this->values_[i] = p.values[i];
+      if (p.offline_action < OFF_ACTION_COUNT)
+        this->offline_action_ = p.offline_action;
+      ESP_LOGI(TAG, "restored settings from flash");
+    } else {
+      // Same size, different meaning. Falling back to the configured defaults
+      // is the only safe reading of that.
+      ESP_LOGW(TAG, "stored settings are version %u, expected %u - using defaults",
+               p.version, PREFS_VERSION);
+    }
   }
+  for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
+    this->apply_setting_(i);
   this->publish_settings_();
+  if (this->offline_select_ != nullptr)
+    this->offline_select_->publish_state(OFFLINE_ACTIONS[this->offline_action_]);
 
-  // Everything shares one bus, so the inverters use the same idea of stalled
-  // and offline as the meter does.
+  // The inverters use the same idea of stalled and offline as the meter does.
+  // Not because they share a bus - they may not - but because it is the same
+  // question, and a second set of timeouts would be two things to tune.
   for (auto *inv : this->inverters_) {
     inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
     inv->set_offline_probe_interval(this->offline_probe_ms_);
@@ -41,15 +61,66 @@ void GrowattHub::setup() {
 
 void GrowattHub::save_prefs_() {
   GrowattHubPrefs p{};
+  p.version = PREFS_VERSION;
+  p.offline_action = this->offline_action_;
   for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
     p.values[i] = this->values_[i];
   this->pref_.save(&p);
+}
+
+// The thresholds are read straight out of values_ where they are used, but the
+// tunables below are held in members that the control code reads on every pass,
+// so a change has to be pushed into them. Doing it here rather than at each use
+// keeps the hot path free of lookups.
+void GrowattHub::apply_setting_(uint8_t field) {
+  float v = this->values_[field];
+  switch (field) {
+    case HUB_UPDATE_INTERVAL: {
+      uint32_t ms = (uint32_t) (v * 1000.0f);
+      if (ms >= 100 && ms != this->get_update_interval()) {
+        // A PollingComponent will not pick up a new interval on its own.
+        this->stop_poller();
+        this->set_update_interval(ms);
+        this->start_poller();
+        ESP_LOGI(TAG, "hub tick now %u ms", (unsigned) ms);
+      }
+      break;
+    }
+    case HUB_STEP_INTERVAL:     this->step_interval_ = (uint32_t) (v * 1000.0f); break;
+    case HUB_REFRESH_INTERVAL:  this->refresh_interval_ = (uint32_t) (v * 1000.0f); break;
+    case HUB_AVERAGE_SAMPLES:   this->set_avg_window((uint8_t) lroundf(v)); break;
+    case HUB_STALLED_TIMEOUT:   this->stalled_ms_ = (uint32_t) (v * 1000.0f); break;
+    case HUB_OFFLINE_TIMEOUT:   this->offline_ms_ = (uint32_t) (v * 1000.0f); break;
+    case HUB_OFFLINE_PROBE:     this->offline_probe_ms_ = (uint32_t) (v * 1000.0f); break;
+    case HUB_IMPORT_THRESHOLD:  this->import_threshold_ = v; break;
+    case HUB_EXPORT_THRESHOLD:  this->export_threshold_ = v; break;
+    case HUB_INCREASE_GAIN:     this->increase_gain_ = v; break;
+    case HUB_DECREASE_GAIN:     this->decrease_gain_ = v; break;
+    case HUB_MIN_STEP:          this->min_step_ = v; break;
+    case HUB_MAX_STEP:          this->max_step_ = v; break;
+    case HUB_STARTUP_RATE:      this->startup_rate_ = v; break;
+    case HUB_OFFGRID_RATE:      this->offgrid_rate_ = v; break;
+    case HUB_PROTECTION_MARGIN: this->protection_margin_ = v; break;
+    case HUB_RESTART_DELAY:     this->restart_delay_s_ = (uint16_t) lroundf(v); break;
+    case HUB_VOLTAGE_SOFT_MARGIN: this->voltage_soft_margin_ = v; break;
+    default: return;  // a plain threshold, read from values_ where it is used
+  }
+  // The health timeouts and the protection margin are pushed down to the
+  // inverters, which hold their own copies.
+  if (field == HUB_STALLED_TIMEOUT || field == HUB_OFFLINE_TIMEOUT ||
+      field == HUB_OFFLINE_PROBE) {
+    for (auto *inv : this->inverters_) {
+      inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
+      inv->set_offline_probe_interval(this->offline_probe_ms_);
+    }
+  }
 }
 
 void GrowattHub::set_setting(uint8_t field, float value) {
   if (field >= HUB_SETTING_COUNT)
     return;
   this->values_[field] = value;
+  this->apply_setting_(field);
   this->save_prefs_();
 }
 
@@ -206,6 +277,28 @@ void GrowattAddressTool::on_modbus_error(uint8_t function_code,
 }
 
 // ============================== GrowattHub ==============================
+
+void GrowattHub::set_offline_action(uint8_t a) {
+  if (a >= OFF_ACTION_COUNT)
+    return;
+  this->offline_action_ = a;
+  this->save_prefs_();
+  if (this->offline_select_ != nullptr)
+    this->offline_select_->publish_state(OFFLINE_ACTIONS[a]);
+  ESP_LOGI(TAG, "meter offline action: %s", OFFLINE_ACTIONS[a]);
+}
+
+void GrowattOfflineActionSelect::control(const std::string &value) {
+  this->publish_state(value);
+  if (this->parent_ == nullptr)
+    return;
+  for (uint8_t i = 0; i < OFF_ACTION_COUNT; i++) {
+    if (value == OFFLINE_ACTIONS[i]) {
+      this->parent_->set_offline_action(i);
+      return;
+    }
+  }
+}
 
 bool GrowattHub::grid_available() const {
   // No contactor sensor declared means we have no way of telling, and assuming
@@ -460,16 +553,65 @@ void GrowattHub::control_power_() {
   }
 
   // Meter gone while connected to the mains: we can no longer tell whether we
-  // are exporting, so production is stopped until it comes back.
+  // are exporting. What follows is a judgement call the site owner has to make,
+  // so it is theirs to set rather than ours to assume.
   if (this->health_ == METER_OFFLINE) {
-    if (now - this->last_step_ >= this->step_interval_) {
-      this->last_step_ = now;
-      ESP_LOGD(TAG, "meter offline, last frame %u ms ago",
+    if (this->offline_since_ == 0)
+      this->offline_since_ = now;
+    if (now - this->last_step_ < this->step_interval_)
+      return;
+    this->last_step_ = now;
+    if (!this->offline_logged_) {
+      ESP_LOGW(TAG, "meter offline, last frame %u ms ago",
                (unsigned) this->meter_age_ms_);
-      this->set_all_(0, "meter offline, production stopped");
+      this->offline_logged_ = true;
     }
+
+    if (this->offline_action_ == OFF_STOP) {
+      this->set_all_(0, "meter offline, production stopped");
+      return;
+    }
+    if (this->offline_action_ == OFF_HOLD) {
+      this->set_ctrl_state_("meter offline, holding");
+      return;
+    }
+
+    // OFF_DECAY: hold first, because most outages are brief and cutting a
+    // healthy system for a lost frame is its own kind of failure. Only once the
+    // meter has stayed gone does the setpoint start walking down.
+    uint32_t gone = now - this->offline_since_;
+    if (gone < this->offline_hold_ms_) {
+      this->set_ctrl_state_("meter offline, holding");
+      return;
+    }
+    bool moved = false;
+    for (size_t i = 0; i < this->inverters_.size(); i++) {
+      GrowattInverter *inv = this->inverters_[i];
+      if (!inv->is_enabled() || !inv->is_online())
+        continue;
+      uint8_t safe = inv->get_safe_power_rate();
+      uint8_t at = inv->get_power_percent();
+      if (at <= safe)
+        continue;
+      float from = at;
+      // One step at a time rather than straight to the safe rate: if the meter
+      // comes back mid-descent, little has been lost.
+      float target = from - this->min_step_;
+      if (target < safe)
+        target = safe;
+      inv->apply_power_rate(target);
+      ESP_LOGW(TAG, "meter gone %u s -> slot %u %.0f%% to %u%% (safe %u%%)",
+               (unsigned) (gone / 1000), (unsigned) i, from,
+               inv->get_power_percent(), safe);
+      moved = true;
+    }
+    this->set_ctrl_state_(moved ? "meter offline, reducing to safe"
+                                : "meter offline, at safe rate");
     return;
   }
+
+  this->offline_since_ = 0;
+  this->offline_logged_ = false;
 
   // A few missed frames are not a reason to move anything.
   if (this->health_ == METER_STALLED) {

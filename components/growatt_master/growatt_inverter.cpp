@@ -8,6 +8,10 @@ namespace growatt_master {
 
 static const char *const TAG = "growatt_inverter";
 
+// Must match CONVENTIONS in __init__.py.
+static const char *const CONV_NAMES[CONV_MODE_COUNT] = {"Auto", "Phase", "Line"};
+
+
 // Growatt doc page 8: minimum 850ms between commands, 1s suggested.
 static const uint32_t IDENT_TIMEOUT_MS = 1500;
 static const uint8_t IDENT_MAX_RETRIES = 2;
@@ -154,14 +158,51 @@ void GrowattInverter::setup() {
 
   GrowattSlotPrefs p{};
   if (this->pref_.load(&p)) {
-    this->address_ = p.address;
-    this->cfg_phases_ = p.cfg_phases;
-    this->cfg_strings_ = p.cfg_strings;
-    this->phase_ = (p.phase > INV_PHASE_L3) ? (uint8_t) INV_PHASE_L1 : p.phase;
-    ESP_LOGI(TAG, "slot %u: restored addr=%u phases=%d strings=%d wired=L%u",
-             this->slot_index_, p.address, p.cfg_phases, p.cfg_strings,
-             this->phase_ + 1);
+    if (p.version == PREFS_VERSION) {
+      this->address_ = p.address;
+      this->cfg_phases_ = p.cfg_phases;
+      this->cfg_strings_ = p.cfg_strings;
+      this->phase_ = (p.phase > INV_PHASE_L3) ? (uint8_t) INV_PHASE_L1 : p.phase;
+      if (p.safe_power_rate <= 100)
+        this->safe_power_rate_ = p.safe_power_rate;
+      if (p.max_power_rate > 0 && p.max_power_rate <= 100) {
+        this->min_power_rate_ = p.min_power_rate;
+        this->max_power_rate_ = p.max_power_rate;
+      }
+      if (p.convention < CONV_MODE_COUNT)
+        this->cfg_convention_ = p.convention;
+      this->auto_protection_ = p.auto_protection != 0;
+      this->protect_eeprom_ = p.protect_eeprom != 0;
+      if (p.update_interval > 0)
+        this->set_update_interval((uint32_t) p.update_interval * 1000);
+      if (p.slow_interval > 0)
+        this->slow_interval_ = (uint32_t) p.slow_interval * 1000;
+      ESP_LOGI(TAG,
+               "slot %u: restored addr=%u phases=%d strings=%d wired=L%u safe=%u%%",
+               this->slot_index_, p.address, p.cfg_phases, p.cfg_strings,
+               this->phase_ + 1, this->safe_power_rate_);
+    } else {
+      ESP_LOGW(TAG, "slot %u: stored settings are version %u, expected %u - "
+               "using defaults", this->slot_index_, p.version, PREFS_VERSION);
+    }
   }
+  if (this->safe_rate_num_ != nullptr)
+    this->safe_rate_num_->publish_state(this->safe_power_rate_);
+  if (this->min_rate_num_ != nullptr)
+    this->min_rate_num_->publish_state(this->min_power_rate_);
+  if (this->max_rate_num_ != nullptr)
+    this->max_rate_num_->publish_state(this->max_power_rate_);
+  if (this->update_num_ != nullptr)
+    this->update_num_->publish_state(this->get_update_interval() / 1000.0f);
+  if (this->slow_num_ != nullptr)
+    this->slow_num_->publish_state(this->slow_interval_ / 1000.0f);
+  if (this->auto_prot_sw_ != nullptr)
+    this->auto_prot_sw_->publish_state(this->auto_protection_);
+  if (this->eeprom_sw_ != nullptr)
+    this->eeprom_sw_->publish_state(this->protect_eeprom_);
+  if (this->convention_select_ != nullptr &&
+      this->cfg_convention_ < CONV_MODE_COUNT)
+    this->convention_select_->publish_state(CONV_NAMES[this->cfg_convention_]);
 
   // After the restore, so the selects show what is actually in force rather
   // than the YAML defaults. Done before the empty slot exit: a slot with no
@@ -179,8 +220,20 @@ void GrowattInverter::setup() {
 }
 
 void GrowattInverter::save_prefs_() {
-  GrowattSlotPrefs p{this->address_, this->cfg_phases_, this->cfg_strings_,
-                     this->phase_};
+  GrowattSlotPrefs p{};
+  p.version = PREFS_VERSION;
+  p.address = this->address_;
+  p.cfg_phases = this->cfg_phases_;
+  p.cfg_strings = this->cfg_strings_;
+  p.phase = this->phase_;
+  p.safe_power_rate = this->safe_power_rate_;
+  p.min_power_rate = this->min_power_rate_;
+  p.max_power_rate = this->max_power_rate_;
+  p.convention = this->cfg_convention_;
+  p.auto_protection = this->auto_protection_ ? 1 : 0;
+  p.protect_eeprom = this->protect_eeprom_ ? 1 : 0;
+  p.update_interval = (uint16_t) (this->get_update_interval() / 1000);
+  p.slow_interval = (uint16_t) (this->slow_interval_ / 1000);
   this->pref_.save(&p);
 }
 
@@ -1085,6 +1138,134 @@ void GrowattInverter::send_write_() {
            this->slot_index_, w.function, w.address, w.count);
 }
 
+// Kinds accepted by GrowattRateNumber, must match __init__.py.
+static const uint8_t RATE_MIN = 0;
+static const uint8_t RATE_MAX = 1;
+static const uint8_t RATE_UPDATE = 2;
+static const uint8_t RATE_SLOW = 3;
+
+void GrowattRateNumber::control(float value) {
+  this->publish_state(value);
+  if (this->parent_ == nullptr)
+    return;
+  switch (this->kind_) {
+    case RATE_MIN:    this->parent_->apply_min_power_rate(value); break;
+    case RATE_MAX:    this->parent_->apply_max_power_rate(value); break;
+    case RATE_UPDATE: this->parent_->apply_update_interval(value); break;
+    default:          this->parent_->apply_slow_interval(value); break;
+  }
+}
+
+void GrowattInverter::apply_min_power_rate(float v) {
+  uint8_t r = (uint8_t) lroundf(v);
+  if (r > this->max_power_rate_)
+    r = this->max_power_rate_;
+  this->min_power_rate_ = r;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: min power rate %u%%", this->slot_index_, r);
+  // A bound that no longer contains the current setpoint is not a bound, so it
+  // is enforced at once rather than at the controller's convenience.
+  if (this->power_percent_ < r)
+    this->apply_power_rate(r);
+  if (this->min_rate_num_ != nullptr)
+    this->min_rate_num_->publish_state(r);
+}
+
+void GrowattInverter::apply_max_power_rate(float v) {
+  uint8_t r = (uint8_t) lroundf(v);
+  if (r < this->min_power_rate_)
+    r = this->min_power_rate_;
+  this->max_power_rate_ = r;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: max power rate %u%%", this->slot_index_, r);
+  if (this->power_percent_ > r)
+    this->apply_power_rate(r);
+  if (this->max_rate_num_ != nullptr)
+    this->max_rate_num_->publish_state(r);
+}
+
+void GrowattInverter::apply_update_interval(float seconds) {
+  uint32_t ms = (uint32_t) (seconds * 1000.0f);
+  if (ms < 1000)
+    return;
+  // A PollingComponent does not notice a new interval by itself.
+  this->stop_poller();
+  this->set_update_interval(ms);
+  this->start_poller();
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: poll interval %u ms", this->slot_index_, (unsigned) ms);
+}
+
+void GrowattInverter::apply_slow_interval(float seconds) {
+  uint32_t ms = (uint32_t) (seconds * 1000.0f);
+  if (ms < 1000)
+    return;
+  this->slow_interval_ = ms;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: slow block interval %u ms", this->slot_index_,
+           (unsigned) ms);
+}
+
+void GrowattInverter::apply_convention(uint8_t c) {
+  if (c >= CONV_MODE_COUNT)
+    return;
+  this->cfg_convention_ = c;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: voltage convention %u", this->slot_index_, c);
+  // The trip thresholds were written in the old convention, so they have to go
+  // out again in the new one.
+  this->protection_applied_ = false;
+}
+
+void GrowattInverter::apply_auto_protection(bool on) {
+  this->auto_protection_ = on;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: automatic protection limits %s", this->slot_index_,
+           on ? "on" : "off");
+  if (on)
+    this->protection_applied_ = false;  // apply them on the next cycle
+  if (this->auto_prot_sw_ != nullptr)
+    this->auto_prot_sw_->publish_state(on);
+}
+
+void GrowattInverter::apply_protect_eeprom(bool on) {
+  this->protect_eeprom_ = on;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: EEPROM setting memory %s", this->slot_index_,
+           on ? "cleared on identification" : "left alone");
+  if (this->eeprom_sw_ != nullptr)
+    this->eeprom_sw_->publish_state(on);
+}
+
+void GrowattInverterOptionSwitch::write_state(bool state) {
+  this->publish_state(state);
+  if (this->parent_ == nullptr)
+    return;
+  if (this->is_eeprom_)
+    this->parent_->apply_protect_eeprom(state);
+  else
+    this->parent_->apply_auto_protection(state);
+}
+
+void GrowattInverter::apply_safe_power_rate(float v) {
+  if (v < 0)
+    v = 0;
+  if (v > 100)
+    v = 100;
+  uint8_t r = (uint8_t) lroundf(v);
+  this->safe_power_rate_ = r;
+  this->save_prefs_();
+  ESP_LOGI(TAG, "slot %u: safe power rate set to %u%%", this->slot_index_, r);
+  // Raising it above the current output is a request for production now, not a
+  // note for later. Lowering it is not: that would cut output while the meter
+  // is perfectly healthy and the controller is in charge.
+  if (r > this->power_percent_) {
+    ESP_LOGI(TAG, "slot %u: currently at %u%%, raising to the new safe rate",
+             this->slot_index_, this->power_percent_);
+    this->apply_power_rate(r);
+  }
+}
+
 void GrowattInverter::apply_power_rate(float pct) {
   if (pct < this->min_power_rate_)
     pct = this->min_power_rate_;
@@ -1901,6 +2082,18 @@ void GrowattInverterAddressNumber::control(float value) {
   this->publish_state(value);
   if (this->parent_ != nullptr)
     this->parent_->change_address((uint8_t) lroundf(value));
+}
+
+void GrowattConventionSelect::control(const std::string &value) {
+  this->publish_state(value);
+  if (this->parent_ == nullptr)
+    return;
+  for (uint8_t i = 0; i < CONV_MODE_COUNT; i++) {
+    if (value == CONV_NAMES[i]) {
+      this->parent_->apply_convention(i);
+      return;
+    }
+  }
 }
 
 void GrowattPhaseCountSelect::control(const std::string &value) {
