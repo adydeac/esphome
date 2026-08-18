@@ -660,6 +660,16 @@ void GrowattInverter::advance_(bool ok) {
       break;
     default: break;
   }
+  if (this->step_ == IDENT_DONE && !this->ident_incomplete_) {
+    // A unit reaching this point has either just booted or just come back from
+    // an outage, and with holding 2 cleared it has forgotten register 3 either
+    // way - so it is running unrestricted while we still believe our last
+    // setpoint is in force. Reassert it now rather than waiting out the refresh
+    // interval, which is a long time to be producing at 100 %.
+    ESP_LOGI(TAG, "slot %u: reasserting %u%% after identification",
+             this->slot_index_, this->power_percent_);
+    this->apply_power_rate(this->power_percent_);
+  }
   if (this->step_ == IDENT_DONE && this->ident_incomplete_) {
     this->ident_runs_++;
     if (this->ident_runs_ < IDENT_MAX_RUNS) {

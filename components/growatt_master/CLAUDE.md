@@ -517,9 +517,27 @@ over. There was a configurable startup rate here; it was removed because any
 value other than zero defeats the point, and the controller reaches a sensible
 level within a few cycles anyway.
 
-The current setpoint is also rewritten every `refresh_interval` (default 60 s)
-even when unchanged, in case the firmware expects to hear from us. With holding
-2 cleared those writes stay out of the EEPROM.
+The current setpoint is also rewritten every `refresh_interval` (default 60 s),
+and that rewrite is deliberately unconditional: not "if it changed", and not "if
+the inverter is online".
+
+The reason is a failure mode that is otherwise invisible. `apply_power_rate()`
+updates `power_percent_` when it queues the write, so a write that is never
+acknowledged leaves the controller believing a setpoint is in force that the
+inverter never received - and nothing in the normal flow ever revisits it. An
+inverter that dropped off the bus while producing is the same divergence from
+the other side: it keeps running at whatever it last heard. Neither shows up in
+the log, because from the controller's point of view everything is fine.
+
+Rewriting everything on a timer costs one small write per inverter per interval,
+and on a unit that really is gone it costs that write's retries in bus time
+before it is dropped. That is the price of not diverging silently.
+
+Identification does the same thing at the moment it matters most: a unit that
+has just come back has power cycled, and with holding 2 cleared it has forgotten
+register 3 - so it is running unrestricted while we believe otherwise. The
+setpoint is reasserted as soon as identification succeeds rather than waiting
+out the refresh interval.
 
 Setting `min_power_rate` and `max_power_rate` to the same value takes an
 inverter out of automatic control without removing it from the configuration.

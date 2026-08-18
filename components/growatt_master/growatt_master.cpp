@@ -446,8 +446,10 @@ void GrowattHub::set_ctrl_state_(const char *s) {
 }
 
 void GrowattHub::set_all_(float pct, const char *reason) {
+  // Offline units included: "stop production" has to reach a unit that is not
+  // answering more than it has to reach one that is.
   for (auto *inv : this->inverters_) {
-    if (inv->is_enabled() && inv->is_online())
+    if (inv->is_enabled())
       inv->apply_power_rate(pct);
   }
   this->set_ctrl_state_(reason);
@@ -456,9 +458,22 @@ void GrowattHub::set_all_(float pct, const char *reason) {
 // The inverter may expect to hear from us regularly, so the current setpoint is
 // rewritten periodically even when it has not changed. With holding 2 cleared
 // these writes stay out of the EEPROM.
+// Deliberately unconditional: not "if it changed", and not "if it is online".
+//
+// A write that is queued and never acknowledged is dropped after its retries,
+// but power_percent_ was already updated when it was queued - so the controller
+// believes a setpoint is in force that the inverter never received, and nothing
+// in the normal flow ever revisits it. An inverter that dropped off the bus
+// while producing is the same problem seen from the other side: it keeps
+// running at whatever it last heard, which is not necessarily what we think.
+//
+// Rewriting everything on a timer is the cheap fix. It costs one small write
+// per inverter per refresh interval, and on a unit that really is gone it costs
+// the write's retries in bus time before being dropped, which is the price of
+// not silently diverging.
 void GrowattHub::refresh_all_() {
   for (auto *inv : this->inverters_) {
-    if (inv->is_enabled() && inv->is_online())
+    if (inv->is_enabled())
       inv->apply_power_rate(inv->get_power_percent());
   }
 }
