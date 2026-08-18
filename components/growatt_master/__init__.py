@@ -168,7 +168,6 @@ GrowattHubNumber = ns.class_("GrowattHubNumber", number.Number)
 CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
 # Health timeouts, applied to inverters and meters alike: the same question,
 # so there is no reason for them to disagree about what stalled means.
-CONF_AVG_SAMPLES = "average_samples"
 
 # ------------------------------ power controller ------------------------------
 
@@ -1041,7 +1040,6 @@ async def to_code(config):
             ts = await text_sensor.new_text_sensor(config[status_key])
             cg.add(tool.set_status(ts))
 
-    cg.add(hub.set_avg_window(config[CONF_AVG_SAMPLES]))
     cg.add(hub.set_rebalancing(config[CONF_REBALANCING]))
     cg.add(hub.set_rebalance_threshold(config[CONF_REBALANCE_THRESHOLD]))
 
