@@ -166,17 +166,25 @@ the detection is "does it populate input 50-52 above 100 V", with a fallback to
 "a phase register reading above 300 V can only be a line voltage", and a per
 inverter override (`voltage_convention: auto | phase | line`).
 
-Because writing these registers wrong can stop the inverter connecting — or
-stop it disconnecting when it should — the automatic adjustment is opt in per
-inverter (`auto_protection_limits`, default off).
+The adjustment is on by default and is a switch rather than a compile time
+option. Leaving an inverter on its factory trip windows means it can disconnect
+before the controller has any chance to reduce output, which is exactly the
+fault 300 case; the windows written here come from the hub thresholds the
+controller already works within, widened by `inverter_protection_margin`.
+
+It can still be turned off per inverter, and there is a real reason to: writing
+these registers wrong can stop a unit connecting, or stop it disconnecting when
+it should.
 
 ### Holding 2 controls whether settings survive a power cycle
 
 It decides whether registers 3, 4, 5 and 99 are remembered. Clearing it has two
 benefits: the frequent power rate writes never reach the EEPROM, and if the
 controller stops running the inverter comes back unrestricted instead of stuck
-at whatever limit was last applied. `protect_eeprom: true` clears it during
-identification whenever it is found set.
+at whatever limit was last applied. It is on by default and clears holding 2
+during identification whenever it is found set - the controller rewrites the
+power rate every few seconds, and letting those reach the EEPROM would wear it
+out. Now a switch rather than a compile time option.
 
 ### Holding 0 is a command register, not a state
 
@@ -624,6 +632,19 @@ than adding a transaction. Check the bus budget first.
 Initial values are picked up automatically: the parse functions loop over the
 table and read anything whose address falls inside the block they just
 received.
+
+### Every switch needs `default_restore_mode="DISABLED"`
+
+ESPHome's default is `RESTORE_DEFAULT_OFF`, which calls `write_state()` during
+setup with whatever it restored. For an ordinary switch that is harmless. Here
+it is not: a register backed switch would write that value straight into a live
+inverter register at every boot, and `inverter_power` restored as off would shut
+the unit down on each restart. The option switches would quietly overwrite the
+value just loaded from flash.
+
+None of these switches own their state. The inverter does, and it is read back
+through `publish_reg_entities_()` or published from the slot preferences, so
+there is nothing for ESPHome to restore in the first place.
 
 ### Adding a register backed switch or select
 

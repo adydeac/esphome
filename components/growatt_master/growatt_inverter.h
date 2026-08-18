@@ -827,7 +827,11 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint8_t cfg_convention_{CONV_AUTO};
 
   // protection limit targets, in volts
-  bool auto_protection_{false};
+  // On by default: the trip windows are derived from the hub thresholds the
+  // controller already works within, so leaving the inverter on its factory
+  // limits means it can disconnect before the controller ever gets a chance to
+  // reduce output.
+  bool auto_protection_{true};
   bool protection_applied_{false};
   float tgt_phase_low_{0};
   float tgt_phase_high_{0};
@@ -858,7 +862,11 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint16_t reg_switch_on_[MAX_REG_SWITCHES]{};
   switch_::Switch *reg_switch_[MAX_REG_SWITCHES]{};
   uint8_t reg_switch_count_{0};
-  bool protect_eeprom_{false};
+  // On by default: the controller rewrites the power rate every few seconds,
+  // and letting those reach the EEPROM would wear it out. Clearing holding 2
+  // also means a unit left alone comes back unrestricted rather than stuck at
+  // whatever limit was last applied.
+  bool protect_eeprom_{true};
 
   // outgoing write commands, drained before any read
   PendingWrite write_queue_[WRITE_QUEUE_SIZE];

@@ -611,7 +611,8 @@ TRIPLE_SCHEMA = cv.Schema(
 def _period_schema():
     schema = {
         cv.Optional(CONF_ENABLED): switch.switch_schema(
-            GrowattWindowSwitch, icon="mdi:calendar-check"
+            GrowattWindowSwitch, icon="mdi:calendar-check",
+            default_restore_mode="DISABLED",
         ),
     }
     for key, _ in PART_KEYS:
@@ -645,14 +646,15 @@ def _inverter_schema():
         # a slot pointed at the wrong address cannot be reached at all. New
         # devices start at 0, which every part of the component reads as
         # "this slot is empty" and never puts on the bus.
-        cv.Required(CONF_ADDRESS): number.number_schema(
+        cv.Required(CONF_ADDRESS): _box_number(
             GrowattInverterAddressNumber, icon="mdi:identifier"
         ),
         # Where this unit parks when the meter has been gone too long to keep
         # holding. Editable at runtime; raising it above the current output
         # applies immediately.
-        cv.Optional(CONF_SAFE_RATE): number.number_schema(
-            GrowattSafeRateNumber, icon="mdi:shield-half-full", unit_of_measurement="%"
+        cv.Optional(CONF_SAFE_RATE): _box_number(
+            GrowattSafeRateNumber, icon="mdi:shield-half-full",
+            unit_of_measurement=UNIT_PERCENT,
         ),
         **{
             cv.Optional(k): _box_number(
@@ -664,10 +666,12 @@ def _inverter_schema():
             GrowattConventionSelect, icon="mdi:sine-wave"
         ),
         cv.Optional("auto_protection_limits_switch"): switch.switch_schema(
-            GrowattInverterOptionSwitch, icon="mdi:shield-outline"
+            GrowattInverterOptionSwitch, icon="mdi:shield-outline",
+            default_restore_mode="DISABLED",
         ),
         cv.Optional("protect_eeprom_switch"): switch.switch_schema(
-            GrowattInverterOptionSwitch, icon="mdi:memory"
+            GrowattInverterOptionSwitch, icon="mdi:memory",
+            default_restore_mode="DISABLED",
         ),
         cv.Optional(CONF_PHASES, default=0): cv.int_range(min=0, max=3),
         cv.Optional(CONF_STRINGS, default=0): cv.int_range(min=0, max=8),
@@ -697,7 +701,8 @@ def _inverter_schema():
         # disables the floor and leans entirely on the repeat confirmations.
         cv.Optional(CONF_PHASE_DETECT_MIN, default=100): cv.float_range(min=0),
         cv.Optional(CONF_AC_CHARGE): switch.switch_schema(
-            GrowattAcChargeSwitch, icon="mdi:transmission-tower-import"
+            GrowattAcChargeSwitch, icon="mdi:transmission-tower-import",
+            default_restore_mode="DISABLED",
         ),
         cv.Optional(CONF_GRID_FIRST): _window_schema(),
         cv.Optional(CONF_BATTERY_FIRST): _window_schema(),
@@ -720,8 +725,12 @@ def _inverter_schema():
         ),
     }
     for key, (_addr, _on, _off, icon) in REGISTER_SWITCHES.items():
+        # DISABLED, emphatically: the default restore mode calls write_state()
+        # at boot, which for these would write the restored value straight into
+        # a live inverter register - 'inverter_power' would switch the unit off
+        # on every restart. The real state is read back from the inverter.
         schema[cv.Optional(key)] = switch.switch_schema(
-            GrowattRegisterSwitch, icon=icon
+            GrowattRegisterSwitch, icon=icon, default_restore_mode="DISABLED"
         )
     for key, (_, lo, hi, step, unit, icon) in SETTING_NUMBERS.items():
         schema[cv.Optional(key)] = _box_number(
@@ -775,7 +784,7 @@ def _meter_schema():
         # 0 or omitted = meter not present. Flash wins at boot.
         # Eastron specifies 1..247 for the whole SDM family, so there is
         # nothing above that to reach. 0 marks the slot empty.
-        cv.Required(CONF_ADDRESS): number.number_schema(
+        cv.Required(CONF_ADDRESS): _box_number(
             GrowattMeterAddressNumber, icon="mdi:identifier"
         ),
         # Override for phase count; "Auto" leaves detection in charge.
@@ -847,10 +856,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_METERS_MODBUS_ID): cv.use_id(modbus.Modbus),
             cv.GenerateID(CONF_ADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
             cv.GenerateID(CONF_MADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
-            cv.Optional(CONF_MADDR_FROM): number.number_schema(
+            cv.Optional(CONF_MADDR_FROM): _box_number(
                 GrowattAddressNumber, icon="mdi:import"
             ),
-            cv.Optional(CONF_MADDR_TO): number.number_schema(
+            cv.Optional(CONF_MADDR_TO): _box_number(
                 GrowattAddressNumber, icon="mdi:export"
             ),
             cv.Optional(CONF_MADDR_CHANGE): button.button_schema(
@@ -864,10 +873,10 @@ CONFIG_SCHEMA = cv.All(
             # entered, whether or not that unit is declared under 'inverters'.
             # Both fields default to 0, the Modbus broadcast address, so the
             # button does nothing until they are filled in.
-            cv.Optional(CONF_ADDR_FROM): number.number_schema(
+            cv.Optional(CONF_ADDR_FROM): _box_number(
                 GrowattAddressNumber, icon="mdi:import"
             ),
-            cv.Optional(CONF_ADDR_TO): number.number_schema(
+            cv.Optional(CONF_ADDR_TO): _box_number(
                 GrowattAddressNumber, icon="mdi:export"
             ),
             cv.Optional(CONF_ADDR_CHANGE): button.button_schema(

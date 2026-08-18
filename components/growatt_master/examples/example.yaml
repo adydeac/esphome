@@ -162,20 +162,16 @@ growatt_master:
     name: "Change Inverter Address"
   change_inverter_address_from:
     name: "Change Inverter Address From"
-    mode: box
   change_inverter_address_to:
     name: "Change Inverter Address To"
-    mode: box
   change_inverter_address_status:
     name: "Change Inverter Address Status"
   change_meter_address:
     name: "Change Meter Address"
   change_meter_address_from:
     name: "Change Meter Address From"
-    mode: box
   change_meter_address_to:
     name: "Change Meter Address To"
-    mode: box
   change_meter_address_status:
     name: "Change Meter Address Status"
 
@@ -184,9 +180,10 @@ growatt_master:
   # list forwards, reductions backwards, so the last declared gives way first.
   # =======================================================================
   inverters:
-    - address:
+    - # Every number in this component defaults to a typed box rather than a
+      # slider, so 'mode' only appears when you want something else.
+      address:
         name: "Growatt01 Address"
-        mode: box
       # modbus_id: bus_meters
       phase: L1
       phases: 0
@@ -602,7 +599,6 @@ growatt_master:
     # A second inverter, showing what a real configuration usually needs.
     - address:
         name: "Growatt02 Address"
-        mode: box
       phase: L2
       max_power_rate:
         name: "Growatt02 Max Power Rate"
@@ -620,7 +616,6 @@ growatt_master:
   meters:
     - address:
         name: "Grid Meter Address"
-        mode: box
       # modbus_id: bus_inverters
       update_interval:
         name: "Grid Meter Poll Interval"
