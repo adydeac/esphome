@@ -98,7 +98,6 @@ void GrowattHub::apply_setting_(uint8_t field) {
     case HUB_DECREASE_GAIN:     this->decrease_gain_ = v; break;
     case HUB_MIN_STEP:          this->min_step_ = v; break;
     case HUB_MAX_STEP:          this->max_step_ = v; break;
-    case HUB_STARTUP_RATE:      this->startup_rate_ = v; break;
     case HUB_OFFGRID_RATE:      this->offgrid_rate_ = v; break;
     case HUB_PROTECTION_MARGIN: this->protection_margin_ = v; break;
     case HUB_RESTART_DELAY:     this->restart_delay_s_ = (uint16_t) lroundf(v); break;
@@ -1110,13 +1109,16 @@ void GrowattHub::update() {
                                 this->restart_delay_s_);
   }
 
-  // Everything starts at the configured startup rate, so a reboot never leaves
-  // the inverters running unsupervised at whatever they had before.
+  // A reboot starts everything at zero, so the inverters are never left running
+  // unsupervised at whatever they had before we lost track of them. This is the
+  // only place production is reset on our initiative: once running, the
+  // setpoint is the controller's to move, and a device coming back from a
+  // comms outage keeps whatever it had rather than starting over.
   if (!this->started_) {
     this->started_ = true;
     this->last_step_ = millis();
     this->last_refresh_ = millis();
-    this->set_all_(this->startup_rate_, "starting up");
+    this->set_all_(0, "starting up");
     return;
   }
   this->control_power_();

@@ -114,7 +114,6 @@ enum HubSetting : uint8_t {
   HUB_DECREASE_GAIN,
   HUB_MIN_STEP,            // %
   HUB_MAX_STEP,            // %
-  HUB_STARTUP_RATE,        // %
   HUB_OFFGRID_RATE,        // %
   HUB_PROTECTION_MARGIN,   // %
   HUB_RESTART_DELAY,       // s
@@ -130,13 +129,18 @@ enum HubSetting : uint8_t {
 //
 // Bump PREFS_VERSION only when the meaning of existing fields changes. Adding a
 // field out of the reserved block does not need it.
-static const uint8_t PREFS_VERSION = 1;
+// 2: the startup rate was removed and every setting after it shifted down one
+// slot. Same size, different meaning - exactly what the version byte is for.
+static const uint8_t PREFS_VERSION = 2;
 
 struct GrowattHubPrefs {
   uint8_t version;
   uint8_t offline_action;
   float values[HUB_SETTING_COUNT];
-  uint8_t reserved[16];
+  // Grew by the four bytes the startup rate used to occupy. Keeping sizeof
+  // constant is what lets load() still succeed; the version byte is what stops
+  // it misreading the shifted fields.
+  uint8_t reserved[20];
 } __attribute__((packed));
 
 // What to do once the meter is definitively gone. Stopping is the safe default
@@ -335,7 +339,6 @@ class GrowattHub : public PollingComponent {
   float max_step_{20.0f};
   uint32_t step_interval_{6000};
   uint32_t refresh_interval_{60000};
-  float startup_rate_{0.0f};
   float offgrid_rate_{100.0f};
   uint32_t last_step_{0};
   uint32_t last_refresh_{0};

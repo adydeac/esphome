@@ -112,8 +112,6 @@ growatt_master:
     name: "Hub Min Step"
   max_step:
     name: "Hub Max Step"
-  startup_power_rate:
-    name: "Hub Startup Power Rate"
   offgrid_power_rate:
     name: "Hub Offgrid Power Rate"
   inverter_protection_margin:

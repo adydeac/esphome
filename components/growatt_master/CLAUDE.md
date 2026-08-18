@@ -508,12 +508,18 @@ would throw away production for a problem that may not be ours.
 Note what this does *not* cover: when an inverter reports over voltage, nothing
 is reduced, only blocked. See "Started but not built".
 
-Two safety behaviours worth keeping: everything starts at `startup_power_rate`
-(default 0) after a reboot, so a restart never leaves the inverters running
-unsupervised at whatever they had before; and the current setpoint is rewritten
-every `refresh_interval` (default 60 s) even when unchanged, in case the
-firmware expects to hear from us. With holding 2 cleared those writes stay out
-of the EEPROM.
+Two safety behaviours worth keeping. A reboot puts everything to zero, so a
+restart never leaves the inverters running unsupervised at whatever they had
+before we lost track of them. That is the only place production is reset on our
+own initiative: once running, the setpoint belongs to the controller, and a
+device returning from a comms outage keeps what it had rather than starting
+over. There was a configurable startup rate here; it was removed because any
+value other than zero defeats the point, and the controller reaches a sensible
+level within a few cycles anyway.
+
+The current setpoint is also rewritten every `refresh_interval` (default 60 s)
+even when unchanged, in case the firmware expects to hear from us. With holding
+2 cleared those writes stay out of the EEPROM.
 
 Setting `min_power_rate` and `max_power_rate` to the same value takes an
 inverter out of automatic control without removing it from the configuration.

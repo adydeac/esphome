@@ -206,12 +206,11 @@ CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
     HUB_DECREASE_GAIN,
     HUB_MIN_STEP,
     HUB_MAX_STEP,
-    HUB_STARTUP_RATE,
     HUB_OFFGRID_RATE,
     HUB_PROTECTION_MARGIN,
     HUB_RESTART_DELAY,
     HUB_VOLTAGE_SOFT_MARGIN,
-) = range(27)
+) = range(26)
 
 CONF_REBALANCING = "phase_rebalancing"
 CONF_REBALANCE_THRESHOLD = "rebalance_threshold"
@@ -272,8 +271,6 @@ HUB_SETTINGS = {
     "min_step": (HUB_MIN_STEP, 1, 1, 50, 1, UNIT_PERCENT, "mdi:step-forward"),
     "max_step": (HUB_MAX_STEP, 20, 1, 100, 1, UNIT_PERCENT,
                  "mdi:step-forward-2"),
-    "startup_power_rate": (HUB_STARTUP_RATE, 0, 0, 100, 1, UNIT_PERCENT,
-                           "mdi:restart"),
     "offgrid_power_rate": (HUB_OFFGRID_RATE, 100, 0, 100, 1, UNIT_PERCENT,
                            "mdi:transmission-tower-off"),
     "inverter_protection_margin": (HUB_PROTECTION_MARGIN, 10, 0, 50, 1,
