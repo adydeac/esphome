@@ -69,80 +69,79 @@ growatt_master:
   grid_power_source: mains_contactor
 
   # --- editable settings ------------------------------------------------
-  # Persisted in flash. The value here is the starting point only.
-  settings:
-    grid_phase_voltage_low:
-      name: "Hub Grid Phase Voltage Low"
-    grid_phase_voltage_high:
-      name: "Hub Grid Phase Voltage High"
-    grid_line_voltage_low:
-      name: "Hub Grid Line Voltage Low"
-    grid_line_voltage_high:
-      name: "Hub Grid Line Voltage High"
-    ups_max_load:
-      name: "Hub Ups Max Load"
-    ups_max_load_avg:
-      name: "Hub Ups Max Load Avg"
-    battery_soc_min:
-      name: "Hub Battery Soc Min"
-    battery_soc_max:
-      name: "Hub Battery Soc Max"
-    grid_export_limit:
-      name: "Hub Grid Export Limit"
-    update_interval:
-      name: "Hub Update Interval"
-    step_interval:
-      name: "Hub Step Interval"
-    refresh_interval:
-      name: "Hub Refresh Interval"
-    average_samples:
-      name: "Hub Average Samples"
-    device_stalled_timeout:
-      name: "Hub Device Stalled Timeout"
-    device_offline_timeout:
-      name: "Hub Device Offline Timeout"
-    device_offline_probe_interval:
-      name: "Hub Device Offline Probe Interval"
-    import_threshold:
-      name: "Hub Import Threshold"
-    export_threshold:
-      name: "Hub Export Threshold"
-    increase_gain:
-      name: "Hub Increase Gain"
-    decrease_gain:
-      name: "Hub Decrease Gain"
-    min_step:
-      name: "Hub Min Step"
-    max_step:
-      name: "Hub Max Step"
-    startup_power_rate:
-      name: "Hub Startup Power Rate"
-    offgrid_power_rate:
-      name: "Hub Offgrid Power Rate"
-    inverter_protection_margin:
-      name: "Hub Inverter Protection Margin"
-    inverter_restart_delay:
-      name: "Hub Inverter Restart Delay"
-    grid_voltage_soft_margin:
-      name: "Hub Grid Voltage Soft Margin"
+  # Persisted in flash. The value here is the starting point only. These are
+  # keys of growatt_master itself, not entries under a 'settings:' block.
+  grid_phase_voltage_low:
+    name: "Grid Phase Voltage Low"
+  grid_phase_voltage_high:
+    name: "Grid Phase Voltage High"
+  grid_line_voltage_low:
+    name: "Grid Line Voltage Low"
+  grid_line_voltage_high:
+    name: "Grid Line Voltage High"
+  ups_max_load:
+    name: "Hub Ups Max Load"
+  ups_max_load_avg:
+    name: "Hub Ups Max Load Avg"
+  battery_soc_min:
+    name: "Hub Battery Soc Min"
+  battery_soc_max:
+    name: "Hub Battery Soc Max"
+  grid_export_limit:
+    name: "Grid Export Limit"
+  update_interval:
+    name: "Hub Update Interval"
+  step_interval:
+    name: "Hub Step Interval"
+  refresh_interval:
+    name: "Hub Refresh Interval"
+  average_samples:
+    name: "Hub Average Samples"
+  device_stalled_timeout:
+    name: "Hub Device Stalled Timeout"
+  device_offline_timeout:
+    name: "Hub Device Offline Timeout"
+  device_offline_probe_interval:
+    name: "Hub Device Offline Probe Interval"
+  import_threshold:
+    name: "Hub Import Threshold"
+  export_threshold:
+    name: "Hub Export Threshold"
+  increase_gain:
+    name: "Hub Increase Gain"
+  decrease_gain:
+    name: "Hub Decrease Gain"
+  min_step:
+    name: "Hub Min Step"
+  max_step:
+    name: "Hub Max Step"
+  startup_power_rate:
+    name: "Hub Startup Power Rate"
+  offgrid_power_rate:
+    name: "Hub Offgrid Power Rate"
+  inverter_protection_margin:
+    name: "Hub Inverter Protection Margin"
+  inverter_restart_delay:
+    name: "Hub Inverter Restart Delay"
+  grid_voltage_soft_margin:
+    name: "Grid Voltage Soft Margin"
 
   # --- derived conditions -----------------------------------------------
   # Each follows from a threshold above, so the number is written once.
-  binary_sensors:
-    grid_power:
-      name: "Grid Grid Power"
-    grid_over_voltage:
-      name: "Grid Grid Over Voltage"
-    grid_under_voltage:
-      name: "Grid Grid Under Voltage"
-    ups_overloaded:
-      name: "Grid Ups Overloaded"
-    ups_overloaded_average:
-      name: "Grid Ups Overloaded Average"
-    battery_below_min:
-      name: "Grid Battery Below Min"
-    battery_above_max:
-      name: "Grid Battery Above Max"
+  grid_power:
+    name: "Grid Power"
+  grid_over_voltage:
+    name: "Grid Over Voltage"
+  grid_under_voltage:
+    name: "Grid Under Voltage"
+  ups_overloaded:
+    name: "Grid Ups Overloaded"
+  ups_overloaded_average:
+    name: "Grid Ups Overloaded Average"
+  battery_below_min:
+    name: "Grid Battery Below Min"
+  battery_above_max:
+    name: "Grid Battery Above Max"
 
   # --- aggregates -------------------------------------------------------
   # Import and export are summed separately across phases: with no netting at
