@@ -106,12 +106,24 @@ CONF_MADDR_TOOL_ID = "meter_address_tool_id"
 CONF_PHASE_DETECT_MIN = "phase_power_detect_threshold"
 # Counters and diagnostics use this cadence; update_interval stays fast enough
 # for control decisions.
+# Same string as ESPHome's own CONF_UPDATE_INTERVAL; ours is the entity.
 CONF_UPDATE_INTERVAL_NUM = "update_interval"
 CONF_SLOW_UPDATE_INTERVAL = "slow_update_interval"
 
-# Poll intervals are entities, not YAML keys: ESPHome's own 'update_interval'
-# would otherwise occupy the name, and two keys for one setting confused more
-# than it helped. These are the values a device starts at before flash has
+def _component_config(conf):
+    """The config as register_component wants it, minus 'update_interval'.
+
+    Taking that name for an entity is not enough on its own: register_component
+    reads the key straight out of the config and hands it to
+    set_update_interval, which then receives the entity's configuration
+    dictionary instead of a time. Stripping it here leaves setup_priority and
+    anything else intact.
+    """
+    return {k: v for k, v in conf.items() if k != CONF_UPDATE_INTERVAL_NUM}
+
+
+# Poll intervals are entities, not YAML keys: two keys for one setting confused
+# more than it helped. These are the values a device starts at before flash has
 # anything to say.
 DEFAULT_HUB_INTERVAL = 2000
 DEFAULT_INVERTER_INTERVAL = 10000
@@ -976,7 +988,7 @@ async def to_code(config):
     # No longer taken from YAML: the tick is an entity, and this is only the
     # value it starts at before flash is read.
     cg.add(hub.set_update_interval(DEFAULT_HUB_INTERVAL))
-    await cg.register_component(hub, config)
+    await cg.register_component(hub, _component_config(config))
     cg.add(hub.set_max_inverters(config[CONF_MAX_INVERTERS]))
     cg.add(hub.set_offline_hold(config[CONF_OFFLINE_HOLD]))
     if CONF_OFFLINE_ACTION in config:
@@ -1084,7 +1096,7 @@ async def to_code(config):
 
     for i, conf in enumerate(config[CONF_INVERTERS]):
         inv = cg.new_Pvariable(conf[CONF_ID])
-        await cg.register_component(inv, conf)
+        await cg.register_component(inv, _component_config(conf))
         # Every slot registers on the bus at 0 and stays silent there until
         # setup() restores a real address from flash, or the user types one.
         await modbus.register_modbus_client_device(
@@ -1245,7 +1257,7 @@ async def to_code(config):
     # ------------------------------- meters -------------------------------
     for i, mconf in enumerate(config.get(CONF_METERS, [])):
         meter = cg.new_Pvariable(mconf[CONF_ID])
-        await cg.register_component(meter, mconf)
+        await cg.register_component(meter, _component_config(mconf))
         await modbus.register_modbus_client_device(
             meter,
             {
