@@ -49,6 +49,23 @@ register.
 These cost real debugging time. None of them are in the manufacturer document,
 and several contradict it.
 
+### Not every register a model has is one it will let you write
+
+A MIN answers exception 1 to a write at holding 19, the reconnect delay, that a
+MOD accepts. The register is there and reads back a sensible 30; it is the write
+the firmware refuses. So "the register exists" is not a test for "the register
+is writable", any more than "it answered" is a test for "it is implemented".
+
+An exception is a capability answer rather than a transient fault, so the
+address is recorded and not written again until the next identification. Without
+that, every protection pass would repeat the same futile write and fill the log.
+
+There is a second thing hiding in this. An exception arriving during a write was
+falling through to `advance_(false)`, the identification path, because nothing
+checked `writing_` first - so a rejected write also advanced a state machine it
+had nothing to do with. Write handling belongs before the poll and dump cases,
+not after.
+
 ### Absent registers answer with zeros, not exceptions
 
 A Growatt inverter asked for a register it does not implement usually replies

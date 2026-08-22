@@ -868,6 +868,17 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // whatever limit was last applied.
   bool protect_eeprom_{true};
 
+  // Registers this unit answered an exception to. A MIN rejects a write to the
+  // reconnect delay at holding 19 that a MOD accepts, and an exception is a
+  // capability answer rather than a transient fault - so it is remembered, and
+  // the register is not written again until the next identification. Without
+  // this, every protection pass would retry the same futile write.
+  static const uint8_t MAX_REJECTED = 8;
+  uint16_t rejected_[MAX_REJECTED]{};
+  uint8_t rejected_count_{0};
+  bool is_rejected_(uint16_t address) const;
+  void mark_rejected_(uint16_t address);
+
   // outgoing write commands, drained before any read
   PendingWrite write_queue_[WRITE_QUEUE_SIZE];
   uint8_t write_head_{0};

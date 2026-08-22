@@ -346,6 +346,7 @@ void GrowattInverter::begin_identification_() {
   this->pac_is_total_ = false;        // re-detected from the next live block
   this->pac_total_hits_ = 0;
   this->nameplate_revised_ = false;
+  this->rejected_count_ = 0;  // a fresh look includes what it will accept
   this->caps_ = GrowattCaps{};        // clears the remembered string count too
   this->want_send_ = true;
 }
@@ -1114,8 +1115,29 @@ void GrowattInverter::publish_derived_() {
 
 // ------------------------------ write path ------------------------------
 
+bool GrowattInverter::is_rejected_(uint16_t address) const {
+  for (uint8_t i = 0; i < this->rejected_count_; i++)
+    if (this->rejected_[i] == address)
+      return true;
+  return false;
+}
+
+void GrowattInverter::mark_rejected_(uint16_t address) {
+  if (this->is_rejected_(address) || this->rejected_count_ >= MAX_REJECTED)
+    return;
+  this->rejected_[this->rejected_count_++] = address;
+}
+
 bool GrowattInverter::queue_write_(uint8_t function, uint16_t address,
                                    const uint16_t *values, uint8_t count) {
+  // Silently skipped rather than logged every time: the unit has already said
+  // it will not take this register, and repeating that at every protection pass
+  // would bury the log in a fact we already know.
+  if (this->is_rejected_(address)) {
+    ESP_LOGV(TAG, "slot %u: skipping write to %u, previously rejected",
+             this->slot_index_, address);
+    return false;
+  }
   if (this->write_count_ >= WRITE_QUEUE_SIZE) {
     ESP_LOGW(TAG, "slot %u: write queue full, dropping write to %u",
              this->slot_index_, address);
@@ -1844,6 +1866,25 @@ void GrowattInverter::on_modbus_error(uint8_t function_code,
 
   ESP_LOGD(TAG, "slot %u: exception %u on function 0x%02X", this->slot_index_,
            exception_code, function_code);
+
+  // A write must be dealt with first: it is not part of the identification
+  // sequence, and letting it fall through would advance that state machine on
+  // the strength of an unrelated failure.
+  if (this->writing_) {
+    const PendingWrite &w = this->write_queue_[this->write_head_];
+    ESP_LOGW(TAG,
+             "slot %u: register %u rejected the write (exception %u); this "
+             "model does not accept it, not trying again until the next "
+             "identification",
+             this->slot_index_, w.address, exception_code);
+    this->mark_rejected_(w.address);
+    this->writing_ = false;
+    this->write_head_ = (this->write_head_ + 1) % WRITE_QUEUE_SIZE;
+    this->write_count_--;
+    this->retries_ = 0;
+    this->want_send_ = this->write_count_ > 0;
+    return;
+  }
 
   if (this->dump_active_) {
     ESP_LOGI(TAG, "DUMP slot %u: range %u not implemented, skipping",
