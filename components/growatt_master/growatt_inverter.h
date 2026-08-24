@@ -403,7 +403,14 @@ struct SensorTriple {
   sensor::Sensor *power{nullptr};
 };
 
-class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevice {
+// Base is ModbusDevice, not ModbusClientDevice. As of ESPHome 2026.8 the
+// on_modbus_data()/on_modbus_error() callbacks live only on ModbusDevice, which
+// is a deprecated compatibility shim translating the new on_response()/on_error()
+// into the old pair. It is scheduled for removal in 2027.2.0, so this component
+// has to migrate to the typed callbacks and the read_*/write_* helpers before
+// then; the Python side already declared modbus.ModbusDevice, which is why the
+// two sides disagreed.
+class GrowattInverter : public PollingComponent, public modbus::ModbusDevice {
  public:
   void setup() override;
   void loop() override;

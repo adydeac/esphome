@@ -53,7 +53,14 @@ enum AddrToolStep : uint8_t {
 //
 // One instance per bus. A ModbusClientDevice belongs to exactly one bus, so a
 // hub spanning two of them cannot be the tool itself - it owns them instead.
-class GrowattAddressTool : public Component, public modbus::ModbusClientDevice {
+// Base is ModbusDevice, not ModbusClientDevice. As of ESPHome 2026.8 the
+// on_modbus_data()/on_modbus_error() callbacks live only on ModbusDevice, which
+// is a deprecated compatibility shim translating the new on_response()/on_error()
+// into the old pair. It is scheduled for removal in 2027.2.0, so this component
+// has to migrate to the typed callbacks and the read_*/write_* helpers before
+// then; the Python side already declared modbus.ModbusDevice, which is why the
+// two sides disagreed.
+class GrowattAddressTool : public Component, public modbus::ModbusDevice {
  public:
   void loop() override;
   void on_modbus_data(const std::vector<uint8_t> &data) override;

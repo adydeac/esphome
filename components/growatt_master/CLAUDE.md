@@ -619,6 +619,26 @@ all" is configurable rather than a constant someone has to recompile.
 blocks, and every storage block on the inverters, are skipped entirely when
 nothing needs them. That is the concrete payoff of capability detection.
 
+## The modbus base class, and the migration waiting there
+
+The three device classes derive from `modbus::ModbusDevice`, not
+`ModbusClientDevice`. Since ESPHome 2026.8 the `on_modbus_data()` /
+`on_modbus_error()` pair exists only on `ModbusDevice`, a deprecated shim that
+translates the new `on_response()` / `on_error()` into the old signatures.
+Deriving from `ModbusClientDevice` while marking those two `override` is a
+compile error, and the symptom names the wrong thing: it says the methods do not
+override, not that the base class changed underneath.
+
+Both the shim and the `send()` helper are scheduled for removal in 2027.2.0.
+Migrating means overriding `on_response()` / `on_error()` (or the typed
+`on_read_input_registers()` and friends) and replacing every `send()` with
+`read_input_registers()`, `write_single_register()`, `write_multiple_registers()`
+or `queue_pdu()`. That is roughly twenty call sites across the two device classes,
+the address tool and the register dump. Worth doing in one pass rather than two -
+the typed callbacks deliver `std::span<const uint16_t>` in host order, so every
+parse function that currently indexes a byte vector changes shape at the same
+time.
+
 ## Bus timing
 
 At 9600 baud a byte is 1.04 ms and a response costs about
