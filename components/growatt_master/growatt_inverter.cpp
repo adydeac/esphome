@@ -872,6 +872,7 @@ void GrowattInverter::parse_fast_main_(const std::vector<uint8_t> &data) {
   pub2(this->grid_active_power_, data, IN_AC_POWER, ONE_DEC);
   this->grid_power_w_ = reg32(data, IN_AC_POWER) * ONE_DEC;
   this->revise_nameplate_();
+  this->update_capability_();
   pub1(this->frequency_, data, IN_FREQUENCY, TWO_DEC);
 
   float iac[3], pac[3];
@@ -1317,6 +1318,58 @@ const char *GrowattInverter::get_derating_text() const {
 
 // Called from the fast poll, where the phase count and the real output are
 // known - neither is available when the nameplate register is first parsed.
+// The inverter never says "you are what is limiting me": derating mode 7 is
+// reported whenever a limit is set, whether or not it binds. But the arithmetic
+// tells us. If output has reached the limit our setpoint implies, the setpoint
+// is the constraint and output scales with it; if output sits far below, the
+// panels are the constraint and raising the setpoint does nothing.
+//
+// Measured on real hardware: an SPH clipping at 9-18 % extrapolated to 9600,
+// 9670, 9671 and 9689 W on four different setpoints, and two MIN units to
+// within 10 W of their 6000 W nameplate. A MOD that was PV limited throughout
+// gave 451, 647, 672, 1292 and 1325 W - which is why the ratio test has to gate
+// this, or the rolling maximum would keep the worst overestimate.
+void GrowattInverter::update_capability_() {
+  if (!this->normal_power_valid_ || std::isnan(this->grid_power_w_) ||
+      this->power_percent_ == 0)
+    return;
+
+  float limit = this->normal_power_va_ * this->power_percent_ / 100.0f;
+  this->rate_binding_ = limit > 0 && this->grid_power_w_ >= this->cap_ratio_ * limit;
+
+  uint32_t now = millis();
+  if (!std::isnan(this->capability_w_) &&
+      now - this->cap_time_ > this->cap_window_ms_) {
+    ESP_LOGD(TAG, "slot %u: capability estimate expired", this->slot_index_);
+    this->capability_w_ = NAN;
+    if (this->capability_sens_ != nullptr)
+      this->capability_sens_->publish_state(NAN);
+  }
+  if (!this->rate_binding_)
+    return;
+
+  float est = this->grid_power_w_ * 100.0f / this->power_percent_;
+  if (est > this->normal_power_va_)
+    est = this->normal_power_va_;
+  if (std::isnan(this->capability_w_) || est >= this->capability_w_) {
+    this->capability_w_ = est;
+    this->cap_time_ = now;
+    if (this->capability_sens_ != nullptr)
+      this->capability_sens_->publish_state(est);
+  }
+}
+
+// Deliberately zero when the setpoint is not binding: an inverter producing
+// 388 W of a 24000 W allowance will not produce more because we allow more.
+float GrowattInverter::available_headroom() const {
+  if (std::isnan(this->capability_w_))
+    return 0.0f;
+  int16_t room = (int16_t) this->max_power_rate_ - (int16_t) this->power_percent_;
+  if (room <= 0)
+    return 0.0f;
+  return this->capability_w_ * room / 100.0f;
+}
+
 void GrowattInverter::revise_nameplate_() {
   if (this->nameplate_revised_ || this->normal_power_va_ <= 0)
     return;

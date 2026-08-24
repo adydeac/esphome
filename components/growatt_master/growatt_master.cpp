@@ -102,6 +102,13 @@ void GrowattHub::apply_setting_(uint8_t field) {
     case HUB_PROTECTION_MARGIN: this->protection_margin_ = v; break;
     case HUB_RESTART_DELAY:     this->restart_delay_s_ = (uint16_t) lroundf(v); break;
     case HUB_VOLTAGE_SOFT_MARGIN: this->voltage_soft_margin_ = v; break;
+    case HUB_CAPABILITY_RATIO:
+    case HUB_CAPABILITY_WINDOW:
+      for (auto *inv : this->inverters_)
+        inv->set_capability_params(
+            this->values_[HUB_CAPABILITY_RATIO],
+            (uint32_t) (this->values_[HUB_CAPABILITY_WINDOW] * 1000.0f));
+      break;
     default: return;  // a plain threshold, read from values_ where it is used
   }
   // The health timeouts and the protection margin are pushed down to the
@@ -926,6 +933,92 @@ void GrowattHub::control_power_() {
     return;
   }
 
+  // Rebalancing runs before the increase pass, not after it.
+  //
+  // It used to be the last resort, and in practice that meant it almost never
+  // ran: the increase pass only needs a few watts of headroom on the tightest
+  // phase to justify a one percent step, so it consumed exactly the margin
+  // rebalancing needed to trigger, cycle after cycle. Measured over 22 control
+  // cycles on the development system, rebalancing fired once - and that once
+  // took the tightest phase from 16 W of headroom to 626 W, which is the
+  // difference between three phase units being able to add 48 W and 1878 W.
+  //
+  // What makes it safe to run first is the target below. Trading is bounded by
+  // what the three phase units can actually absorb, so when nothing can take
+  // the slack the target collapses and nothing is traded. Without that bound,
+  // putting rebalancing first would walk the single phase units down to zero.
+  if (this->rebalance_) {
+    float busiest = NAN, worst = NAN;
+    for (uint8_t p = 0; p < 3; p++) {
+      if (std::isnan(err[p]))
+        continue;
+      if (std::isnan(busiest) || err[p] > busiest)
+        busiest = err[p];
+      if (std::isnan(worst) || err[p] < worst)
+        worst = err[p];
+    }
+    if (worst < 0)
+      worst = 0;
+
+    // Only units whose output is actually held back by our setpoint count: one
+    // producing 388 W of a 24000 W allowance will not produce more because we
+    // allow more, however large its nameplate.
+    float takers = 0;
+    for (auto *inv : this->inverters_) {
+      if (inv->is_enabled() && inv->is_online() && inv->get_phases() >= 3 &&
+          inv->can_produce_more())
+        takers += inv->available_headroom();
+    }
+
+    // A three phase unit spreads evenly, so delivering X to the busiest phase
+    // costs X of headroom on each of the others. The target is the smaller of
+    // what the busiest phase needs and what the takers could actually supply.
+    float target = takers / 3.0f;
+    if (!std::isnan(busiest) && target > busiest)
+      target = busiest;
+
+    if (!std::isnan(busiest) && busiest > this->import_threshold_ &&
+        target - worst > this->rebalance_threshold_) {
+      bool traded = false;
+      for (uint8_t p = 0; p < 3; p++) {
+        if (std::isnan(err[p]))
+          continue;
+        float free_up = target - err[p];
+        if (free_up <= 0)
+          continue;
+
+        for (int i = (int) this->inverters_.size() - 1; i >= 0; i--) {
+          GrowattInverter *inv = this->inverters_[i];
+          if (!inv->is_enabled() || !inv->is_online())
+            continue;
+          if (inv->get_phases() >= 3 || inv->get_phase() != p)
+            continue;
+          if (inv->get_power_percent() <= inv->get_min_power_rate())
+            continue;
+          float out = inv->get_grid_power();
+          if (std::isnan(out) || out < MIN_INJECTING_W)
+            continue;
+
+          float step = this->step_for_(inv, free_up, this->decrease_gain_);
+          float from = inv->get_power_percent();
+          inv->apply_power_rate(from - step);
+          ESP_LOGI(TAG,
+                   "L%u needs %.0f W more headroom to reach the %.0f W the "
+                   "three phase units can absorb; trading slot %u down %.1f%% "
+                   "(%.0f%% to %u%%)",
+                   p + 1, free_up, target, (unsigned) i, step, from,
+                   inv->get_power_percent());
+          traded = true;
+          break;
+        }
+      }
+      if (traded) {
+        this->set_ctrl_state_("rebalancing phases");
+        return;
+      }
+    }
+  }
+
   // ---- then one increase, whichever inverter can absorb the most ----
   // Comparing usable power rather than applying a fixed preference settles the
   // single versus three phase question on its own: with the import spread
@@ -1042,69 +1135,6 @@ void GrowattHub::control_power_() {
   // meaningfully below the busiest one is treated, because two lightly loaded
   // phases block just as effectively as one.
   //
-  // This runs after the increase pass on purpose: sacrificing production is
-  // only justified once there is no ordinary way left to cover the import.
-  if (this->rebalance_) {
-    float busiest = NAN;
-    for (uint8_t p = 0; p < 3; p++) {
-      if (std::isnan(err[p]))
-        continue;
-      if (std::isnan(busiest) || err[p] > busiest)
-        busiest = err[p];
-    }
-
-    bool taker = false;
-    for (auto *inv : this->inverters_) {
-      if (inv->is_enabled() && inv->is_online() && inv->get_phases() >= 3 &&
-          inv->get_power_percent() < inv->get_max_power_rate() &&
-          inv->can_produce_more()) {
-        taker = true;
-        break;
-      }
-    }
-
-    if (!std::isnan(busiest) && busiest > this->import_threshold_ && taker) {
-      bool traded = false;
-      for (uint8_t p = 0; p < 3; p++) {
-        if (std::isnan(err[p]))
-          continue;
-        float deficit = busiest - err[p];
-        if (deficit <= this->rebalance_threshold_)
-          continue;
-
-        for (int i = (int) this->inverters_.size() - 1; i >= 0; i--) {
-          GrowattInverter *inv = this->inverters_[i];
-          if (!inv->is_enabled() || !inv->is_online())
-            continue;
-          if (inv->get_phases() >= 3)
-            continue;
-          if (inv->get_phase() != p)
-            continue;
-          if (inv->get_power_percent() <= inv->get_min_power_rate())
-            continue;
-          float out = inv->get_grid_power();
-          if (std::isnan(out) || out < MIN_INJECTING_W)
-            continue;
-
-          float step = this->step_for_(inv, deficit, this->decrease_gain_);
-          float from = inv->get_power_percent();
-          inv->apply_power_rate(from - step);
-          ESP_LOGI(TAG,
-                   "L%u sits %.0f W below the busiest phase; trading slot %u "
-                   "down %.1f%% (%.0f%% to %u%%) to free three phase headroom",
-                   p + 1, deficit, (unsigned) i, step, from,
-                   inv->get_power_percent());
-          traded = true;
-          break;
-        }
-      }
-      if (traded) {
-        this->set_ctrl_state_("rebalancing phases");
-        return;
-      }
-    }
-  }
-
   this->set_ctrl_state_("balanced");
 }
 

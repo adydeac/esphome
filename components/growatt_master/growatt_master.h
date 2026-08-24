@@ -118,6 +118,8 @@ enum HubSetting : uint8_t {
   HUB_PROTECTION_MARGIN,   // %
   HUB_RESTART_DELAY,       // s
   HUB_VOLTAGE_SOFT_MARGIN, // V
+  HUB_CAPABILITY_RATIO,    // fraction of the implied limit that counts as "binding"
+  HUB_CAPABILITY_WINDOW,   // s, how long a capability estimate stays valid
   HUB_SETTING_COUNT,
 };
 
@@ -140,7 +142,7 @@ struct GrowattHubPrefs {
   // Grew by the four bytes the startup rate used to occupy. Keeping sizeof
   // constant is what lets load() still succeed; the version byte is what stops
   // it misreading the shifted fields.
-  uint8_t reserved[20];
+  uint8_t reserved[12];
 } __attribute__((packed));
 
 // What to do once the meter is definitively gone. Stopping is the safe default

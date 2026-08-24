@@ -210,7 +210,9 @@ CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
     HUB_PROTECTION_MARGIN,
     HUB_RESTART_DELAY,
     HUB_VOLTAGE_SOFT_MARGIN,
-) = range(26)
+    HUB_CAPABILITY_RATIO,
+    HUB_CAPABILITY_WINDOW,
+) = range(28)
 
 CONF_REBALANCING = "phase_rebalancing"
 CONF_REBALANCE_THRESHOLD = "rebalance_threshold"
@@ -279,6 +281,13 @@ HUB_SETTINGS = {
                                "mdi:timer-refresh-outline"),
     "grid_voltage_soft_margin": (HUB_VOLTAGE_SOFT_MARGIN, 8, 0, 50, 1,
                                  UNIT_VOLT, "mdi:speedometer-slow"),
+    # An inverter is only telling us something about its capability while our
+    # own limit is what it is actually hitting. Output at or above this
+    # fraction of the limit our setpoint implies counts as binding.
+    "capability_binding_ratio": (HUB_CAPABILITY_RATIO, 0.9, 0.5, 1.0, 0.01,
+                                 None, "mdi:gauge"),
+    "capability_window": (HUB_CAPABILITY_WINDOW, 3600, 60, 86400, 60,
+                          UNIT_SECOND, "mdi:history"),
 }
 
 # key -> (setter, icon, device_class)
@@ -429,6 +438,8 @@ SENSORS = {
     # --- input 0..124, polled every update_interval ---
     "status_code": ("set_status_code", None, 0, None, None),
     "pv_active_power": ("set_pv_active_power", _W, 1, _DW, _M),
+    "capability": (
+        "set_capability", UNIT_WATT, 0, DEVICE_CLASS_POWER, _M),
     "grid_active_power": ("set_grid_active_power", _W, 1, _DW, _M),
     CONF_FREQUENCY: ("set_frequency", UNIT_HERTZ, 2, DEVICE_CLASS_FREQUENCY, _M),
     "energy_today": ("set_energy_today", UNIT_KWH, 1, _DE, _T),

@@ -540,6 +540,17 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void set_auto_protection_switch(switch_::Switch *s) { this->auto_prot_sw_ = s; }
   void set_protect_eeprom_switch(switch_::Switch *s) { this->eeprom_sw_ = s; }
   uint8_t get_min_power_rate() const { return this->min_power_rate_; }
+  // How much this unit could produce at 100 %, inferred only while our own
+  // limit is what it is actually hitting. See update_capability_().
+  void set_capability_params(float ratio, uint32_t window_ms) {
+    this->cap_ratio_ = ratio;
+    this->cap_window_ms_ = window_ms;
+  }
+  float get_capability() const { return this->capability_w_; }
+  bool rate_is_binding() const { return this->rate_binding_; }
+  // What raising this unit could still deliver. Zero when our limit is not what
+  // is holding it back, because then raising it achieves nothing.
+  float available_headroom() const;
   uint8_t get_max_power_rate() const { return this->max_power_rate_; }
 
   // Clamps, stores and writes the active power rate, refreshing the UI entity.
@@ -629,6 +640,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // input 0..124
   GI_SETTER(status_code, status_code_)
   GI_SETTER(pv_active_power, pv_active_power_)
+  GI_SETTER(capability, capability_sens_)
   GI_SETTER(grid_active_power, grid_active_power_)
   GI_SETTER(frequency, frequency_)
   GI_SETTER(energy_today, energy_today_)
@@ -803,6 +815,17 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint32_t bus_release_{0};
   uint8_t retries_{0};
   uint8_t power_percent_{0};
+  // Capability estimate. NAN until the unit has been seen actually clipping at
+  // our setpoint; expires after cap_window_ms_ because an hour old figure says
+  // nothing about the sun now.
+  float capability_w_{NAN};
+  uint32_t cap_time_{0};
+  float cap_ratio_{0.9f};
+  uint32_t cap_window_ms_{3600000};
+  bool rate_binding_{false};
+  void update_capability_();
+  sensor::Sensor *capability_sens_{nullptr};
+
   uint8_t safe_power_rate_{0};
   number::Number *safe_rate_num_{nullptr};
   number::Number *min_rate_num_{nullptr};
