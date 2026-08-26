@@ -173,6 +173,7 @@ void GrowattAddressTool::start() {
 }
 
 void GrowattAddressTool::send_() {
+  bool queued;
   if (this->step_ == ADDR_PROBE) {
     // Function 3 at register 0 is about the most universal question there is:
     // a device that implements it answers with data, one that does not answers
@@ -180,25 +181,45 @@ void GrowattAddressTool::send_() {
     // probe needs to know. Two registers rather than one, because Eastron
     // rejects any request for an odd number and Growatt does not mind.
     this->address_ = this->to_;
-    this->send(CMD_READ_HOLDING, 0, 2);
+    queued = this->read_holding_registers(0, 2);
   } else {
     this->address_ = this->from_;
     if (this->float_format_) {
       // Eastron keeps the address as a float32 across two registers and only
-      // accepts function 16.
+      // accepts function 16. Big endian across the pair: high word first.
       float v = (float) this->to_;
       uint32_t bits;
       memcpy(&bits, &v, sizeof(bits));
-      const uint8_t payload[4] = {(uint8_t) (bits >> 24), (uint8_t) (bits >> 16),
-                                  (uint8_t) (bits >> 8), (uint8_t) bits};
-      this->send(CMD_WRITE_MULTI, this->addr_reg_, 2, 4, payload);
+      const uint16_t values[2] = {(uint16_t) (bits >> 16), (uint16_t) bits};
+      queued = this->write_multiple_registers(this->addr_reg_, values);
     } else {
-      const uint8_t payload[2] = {0, this->to_};
-      this->send(CMD_WRITE_SINGLE, this->addr_reg_, 1, 2, payload);
+      queued = this->write_single_register(this->addr_reg_, this->to_);
     }
+  }
+  // A refused request never produces a callback of any kind, so waiting for one
+  // would burn the full timeout. The queue is empty by the time we get here
+  // (loop() gates on ready_for_immediate_send()), which makes this close to
+  // unreachable - but a silent stall is exactly the failure that is hard to
+  // diagnose from a log, so it is handled rather than assumed away.
+  if (!queued) {
+    ESP_LOGW(TAG, "%s address change: request refused by the bus, retrying",
+             this->label_);
+    this->waiting_ = false;
+    return;
   }
   this->sent_ = millis();
   this->waiting_ = true;
+}
+
+void GrowattAddressTool::answered_(bool ok_write) {
+  if (this->step_ == ADDR_IDLE || !this->waiting_)
+    return;
+  this->waiting_ = false;
+  if (this->step_ == ADDR_PROBE) {
+    this->finish_("NEW ADDRESS IS IN USE", false);
+    return;
+  }
+  this->finish_(ok_write ? "OK" : "FAILED", ok_write);
 }
 
 void GrowattAddressTool::finish_(const char *status, bool ok) {
@@ -210,6 +231,11 @@ void GrowattAddressTool::finish_(const char *status, bool ok) {
     this->status_->publish_state(status);
   this->step_ = ADDR_IDLE;
   this->waiting_ = false;
+  // Drop anything of ours still queued: a probe retry that has not gone out yet
+  // would otherwise fire after the tool has already reported its verdict.
+  // Silent by design - clear_tx_queue_for_device() discards without callbacks,
+  // so no stale answer can walk back into the state machine we just reset.
+  this->clear_tx_queue_for_device();
   this->address_ = 0;  // stop matching anything on the bus
 }
 
@@ -254,32 +280,59 @@ void GrowattAddressTool::loop() {
   this->send_();
 }
 
-void GrowattAddressTool::on_modbus_data(const std::vector<uint8_t> &data) {
+void GrowattAddressTool::on_read_registers(modbus::EntityType entity_type,
+                                           uint16_t start_address,
+                                           std::span<const uint16_t> registers,
+                                           modbus::ResponseStatus status) {
   if (this->step_ == ADDR_IDLE || !this->waiting_)
     return;
-  this->waiting_ = false;
-  if (this->step_ == ADDR_PROBE) {
-    this->finish_("NEW ADDRESS IS IN USE", false);
-    return;
+  // An exception is still an answer, and an answer means something is there.
+  if (!modbus::succeeded(status) && this->step_ == ADDR_PROBE) {
+    ESP_LOGI(TAG, "%s address change: exception %u from %u - the address is taken",
+             this->label_, (unsigned) static_cast<uint8_t>(status.value()),
+             this->to_);
   }
-  this->finish_("OK", true);
+  this->answered_(false);
 }
 
-void GrowattAddressTool::on_modbus_error(uint8_t function_code,
-                                         uint8_t exception_code) {
+void GrowattAddressTool::on_write_single_register(uint16_t address,
+                                                  uint16_t value,
+                                                  modbus::ResponseStatus status) {
   if (this->step_ == ADDR_IDLE || !this->waiting_)
     return;
-  this->waiting_ = false;
-  if (this->step_ == ADDR_PROBE) {
-    // An exception is still an answer, and an answer means something is there.
-    ESP_LOGI(TAG, "%s address change: exception %u from %u - the address is taken",
-             this->label_, exception_code, this->to_);
-    this->finish_("NEW ADDRESS IS IN USE", false);
-    return;
+  if (!modbus::succeeded(status)) {
+    ESP_LOGE(TAG, "%s address change: exception %u on function 0x%02X",
+             this->label_, (unsigned) static_cast<uint8_t>(status.value()),
+             CMD_WRITE_SINGLE);
   }
-  ESP_LOGE(TAG, "%s address change: exception %u on function 0x%02X",
-           this->label_, exception_code, function_code);
-  this->finish_("FAILED", false);
+  this->answered_(modbus::succeeded(status));
+}
+
+void GrowattAddressTool::on_write_multiple_registers(
+    uint16_t start_address, std::span<const uint16_t> registers,
+    modbus::ResponseStatus status) {
+  if (this->step_ == ADDR_IDLE || !this->waiting_)
+    return;
+  if (!modbus::succeeded(status)) {
+    ESP_LOGE(TAG, "%s address change: exception %u on function 0x%02X",
+             this->label_, (unsigned) static_cast<uint8_t>(status.value()),
+             CMD_WRITE_MULTI);
+  }
+  this->answered_(modbus::succeeded(status));
+}
+
+// A reply that does not conform to the standard shape still proves a device is
+// there, which is the whole question the probe is asking. For a write it proves
+// nothing about whether the register took the value, so it counts as a failure -
+// which matches what the timeout would have reported anyway.
+void GrowattAddressTool::on_custom_response(std::span<const uint8_t> request_pdu,
+                                            std::span<const uint8_t> response_pdu,
+                                            modbus::ResponseStatus status) {
+  if (this->step_ == ADDR_IDLE || !this->waiting_)
+    return;
+  ESP_LOGD(TAG, "%s address change: non-standard reply (%u bytes)", this->label_,
+           (unsigned) response_pdu.size());
+  this->answered_(false);
 }
 
 // ============================== GrowattHub ==============================

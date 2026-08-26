@@ -27,16 +27,17 @@ static const char *const MODEL_NAMES[METER_MODEL_COUNT] = {
     "Auto", "SDM120", "SDM220", "SDM230", "SDM630",
 };
 
-// IEEE754 single precision, big endian (ABCD byte order).
-static inline float fp32(const std::vector<uint8_t> &d, size_t reg) {
-  uint32_t raw = ((uint32_t) d[reg * 2] << 24) | ((uint32_t) d[reg * 2 + 1] << 16) |
-                 ((uint32_t) d[reg * 2 + 2] << 8) | (uint32_t) d[reg * 2 + 3];
+// IEEE754 single precision, big endian (ABCD byte order). The registers arrive
+// in host order, so the pair only has to be joined high word first - the byte
+// swapping the old vector form did by hand is already done.
+static inline float fp32(std::span<const uint16_t> d, size_t reg) {
+  uint32_t raw = ((uint32_t) d[reg] << 16) | (uint32_t) d[reg + 1];
   float f;
   memcpy(&f, &raw, sizeof(f));
   return f;
 }
 
-static inline void pubf(sensor::Sensor *s, const std::vector<uint8_t> &d,
+static inline void pubf(sensor::Sensor *s, std::span<const uint16_t> d,
                         size_t reg) {
   if (s != nullptr)
     s->publish_state(fp32(d, reg));
@@ -47,8 +48,8 @@ static inline void pub_val_m(sensor::Sensor *s, float v) {
     s->publish_state(v);
 }
 
-static inline uint16_t reg16m(const std::vector<uint8_t> &d, size_t reg) {
-  return encode_uint16(d[reg * 2], d[reg * 2 + 1]);
+static inline uint16_t reg16m(std::span<const uint16_t> d, size_t reg) {
+  return d[reg];
 }
 
 // ============================== GrowattMeter ==============================
@@ -302,43 +303,72 @@ void GrowattMeter::loop() {
   }
 }
 
+// A refused request produces no callback at all, so waiting for one would cost
+// the full timeout for nothing. Both send paths funnel their outcome through
+// here: accepted means the wait starts, refused means retry on the next pass
+// against the same retry budget a timeout uses, so a persistently refusing bus
+// still ends in the usual "no answer" path rather than looping forever.
+bool GrowattMeter::queued_(bool ok) {
+  if (ok) {
+    this->last_send_ = millis();
+    this->waiting_ = true;
+    return true;
+  }
+  this->waiting_ = false;
+  this->retries_++;
+  this->bus_release_ = millis();
+  if (this->retries_ <= METER_MAX_RETRIES) {
+    ESP_LOGD(TAG, "meter %u: bus refused the request, retrying (%u/%u)",
+             this->slot_index_, this->retries_, METER_MAX_RETRIES);
+    this->want_send_ = true;
+    return false;
+  }
+  ESP_LOGW(TAG, "meter %u: bus kept refusing the request, giving up on this block",
+           this->slot_index_);
+  if (this->poll_ != MPOLL_IDLE)
+    this->advance_poll_();
+  else
+    this->advance_(false);
+  return false;
+}
+
 void GrowattMeter::send_step_() {
+  bool ok;
   switch (this->step_) {
     case MSTEP_START:
       this->step_ = MSTEP_ID;
       // fallthrough
     case MSTEP_ID:
-      this->send(CMD_READ_HOLDING, SDM_ID_BASE, SDM_ID_CNT);
+      ok = this->read_holding_registers(SDM_ID_BASE, SDM_ID_CNT);
       break;
     case MSTEP_MAIN:
-      this->send(CMD_READ_INPUT, SDM_MAIN_BASE, SDM_MAIN_CNT);
+      ok = this->read_input_registers(SDM_MAIN_BASE, SDM_MAIN_CNT);
       break;
     default:
       return;
   }
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  this->queued_(ok);
 }
 
 void GrowattMeter::send_poll_() {
+  bool ok;
   switch (this->poll_) {
     case MPOLL_FAST:
-      this->send(CMD_READ_INPUT, SDM_FAST_BASE, SDM_FAST_CNT);
+      ok = this->read_input_registers(SDM_FAST_BASE, SDM_FAST_CNT);
       break;
     case MPOLL_SLOW:
-      this->send(CMD_READ_INPUT, SDM_SLOW_BASE, SDM_SLOW_CNT);
+      ok = this->read_input_registers(SDM_SLOW_BASE, SDM_SLOW_CNT);
       break;
     case MPOLL_LINE:
-      this->send(CMD_READ_INPUT, SDM_LINE_BASE, SDM_LINE_CNT);
+      ok = this->read_input_registers(SDM_LINE_BASE, SDM_LINE_CNT);
       break;
     case MPOLL_ENERGY:
-      this->send(CMD_READ_INPUT, SDM_ENERGY_BASE, SDM_ENERGY_CNT);
+      ok = this->read_input_registers(SDM_ENERGY_BASE, SDM_ENERGY_CNT);
       break;
     default:
       return;
   }
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  this->queued_(ok);
 }
 
 void GrowattMeter::advance_(bool ok) {
@@ -386,7 +416,7 @@ void GrowattMeter::advance_poll_() {
 
 // ------------------------------ parsing ------------------------------
 
-void GrowattMeter::detect_phases_(const std::vector<uint8_t> &data) {
+void GrowattMeter::detect_phases_(std::span<const uint16_t> data) {
   // A forced model already decided the phase count.
   if (this->model_ != METER_AUTO)
     return;
@@ -409,7 +439,7 @@ void GrowattMeter::detect_phases_(const std::vector<uint8_t> &data) {
 }
 
 // Fast part, input 0x0000..0x0035: per phase values plus total active power.
-void GrowattMeter::parse_main_(const std::vector<uint8_t> &data) {
+void GrowattMeter::parse_main_(std::span<const uint16_t> data) {
   for (uint8_t i = 0; i < 3; i++) {
     MeterTriple &t = this->phases_sens_[i];
     this->phase_voltage_[i] = fp32(data, SDM_V[i]);
@@ -428,7 +458,7 @@ void GrowattMeter::parse_main_(const std::vector<uint8_t> &data) {
 }
 
 // Slow part, input 0x0036..0x004F: totals, frequency and energy counters.
-void GrowattMeter::parse_slow_(const std::vector<uint8_t> &data) {
+void GrowattMeter::parse_slow_(std::span<const uint16_t> data) {
   const uint8_t B = SDM_SLOW_BASE;  // rebase absolute offsets
   pubf(this->total_s_, data, SDM_TOTAL_S - B);
   pubf(this->total_q_, data, SDM_TOTAL_Q - B);
@@ -440,14 +470,14 @@ void GrowattMeter::parse_slow_(const std::vector<uint8_t> &data) {
   pubf(this->export_re_, data, SDM_EXPORT_RE - B);
 }
 
-void GrowattMeter::parse_line_(const std::vector<uint8_t> &data) {
+void GrowattMeter::parse_line_(std::span<const uint16_t> data) {
   for (uint8_t i = 0; i < 3; i++)
     pubf(this->line_voltages_[i], data, SDM_LINE_V[i]);
   pubf(this->avg_line_v_, data, SDM_LINE_AVG);
   pubf(this->neutral_i_, data, SDM_NEUTRAL_I);
 }
 
-void GrowattMeter::parse_energy_(const std::vector<uint8_t> &data) {
+void GrowattMeter::parse_energy_(std::span<const uint16_t> data) {
   pubf(this->total_active_e_, data, SDM_TOTAL_ACTIVE_E);
   pubf(this->total_reactive_e_, data, SDM_TOTAL_REACTIVE_E);
 }
@@ -465,22 +495,13 @@ void GrowattMeter::publish_info_() {
 
 // ------------------------------ responses ------------------------------
 
-void GrowattMeter::on_modbus_error(uint8_t function_code,
-                                   uint8_t exception_code) {
-  if (!this->is_enabled() || !this->waiting_)
-    return;
-  this->last_update_ = micros();
-  this->waiting_ = false;
-  this->bus_release_ = millis();
-  ESP_LOGD(TAG, "meter %u: exception %u on function 0x%02X", this->slot_index_,
-           exception_code, function_code);
-  if (this->poll_ != MPOLL_IDLE)
-    this->advance_poll_();
-  else
-    this->advance_(false);
-}
-
-void GrowattMeter::on_modbus_data(const std::vector<uint8_t> &data) {
+// Success and exception arrive here alike, the outcome in status. An exception
+// is still proof the meter is alive and talking, so it refreshes last_update_
+// exactly as data does.
+void GrowattMeter::on_read_registers(modbus::EntityType entity_type,
+                                     uint16_t start_address,
+                                     std::span<const uint16_t> data,
+                                     modbus::ResponseStatus status) {
   if (!this->is_enabled())
     return;
   this->last_update_ = micros();
@@ -490,15 +511,25 @@ void GrowattMeter::on_modbus_data(const std::vector<uint8_t> &data) {
   this->waiting_ = false;
   this->bus_release_ = millis();
 
+  if (!modbus::succeeded(status)) {
+    ESP_LOGD(TAG, "meter %u: exception %u at register %u", this->slot_index_,
+             (unsigned) static_cast<uint8_t>(status.value()), start_address);
+    if (this->poll_ != MPOLL_IDLE)
+      this->advance_poll_();
+    else
+      this->advance_(false);
+    return;
+  }
+
   if (this->poll_ != MPOLL_IDLE) {
-    if (this->poll_ == MPOLL_FAST && data.size() >= SDM_FAST_CNT * 2) {
+    if (this->poll_ == MPOLL_FAST && data.size() >= SDM_FAST_CNT) {
       this->detect_phases_(data);
       this->parse_main_(data);
-    } else if (this->poll_ == MPOLL_SLOW && data.size() >= SDM_SLOW_CNT * 2) {
+    } else if (this->poll_ == MPOLL_SLOW && data.size() >= SDM_SLOW_CNT) {
       this->parse_slow_(data);
-    } else if (this->poll_ == MPOLL_LINE && data.size() >= SDM_LINE_CNT * 2) {
+    } else if (this->poll_ == MPOLL_LINE && data.size() >= SDM_LINE_CNT) {
       this->parse_line_(data);
-    } else if (this->poll_ == MPOLL_ENERGY && data.size() >= SDM_ENERGY_CNT * 2) {
+    } else if (this->poll_ == MPOLL_ENERGY && data.size() >= SDM_ENERGY_CNT) {
       this->parse_energy_(data);
     }
     this->advance_poll_();
@@ -507,7 +538,7 @@ void GrowattMeter::on_modbus_data(const std::vector<uint8_t> &data) {
 
   switch (this->step_) {
     case MSTEP_ID:
-      if (data.size() < SDM_ID_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < SDM_ID_CNT) { this->advance_(false); return; }
       // The meaning of these words is not confirmed across models, so they are
       // recorded and shown raw until a documented mapping is available.
       for (uint8_t i = 0; i < SDM_ID_CNT; i++)
@@ -517,7 +548,7 @@ void GrowattMeter::on_modbus_data(const std::vector<uint8_t> &data) {
                this->id_words_[3]);
       break;
     case MSTEP_MAIN:
-      if (data.size() < SDM_MAIN_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < SDM_MAIN_CNT) { this->advance_(false); return; }
       this->detect_phases_(data);
       this->parse_main_(data);
       break;
@@ -525,6 +556,35 @@ void GrowattMeter::on_modbus_data(const std::vector<uint8_t> &data) {
       return;
   }
   this->advance_(true);
+}
+
+// A reply whose length does not match what was asked for never reaches the typed
+// callback above - the dispatcher diverts it here rather than delivering a short
+// block as if it were complete. That is the same verdict the old size guards
+// reached, so the handling is the same: the block is unusable, advance without
+// parsing. Without this override the default only logs and the meter would sit
+// in waiting_ until its own timeout.
+void GrowattMeter::on_custom_response(std::span<const uint8_t> request_pdu,
+                                      std::span<const uint8_t> response_pdu,
+                                      modbus::ResponseStatus status) {
+  if (!this->is_enabled())
+    return;
+  this->last_update_ = micros();
+
+  if (!this->waiting_)
+    return;
+  this->waiting_ = false;
+  this->bus_release_ = millis();
+
+  ESP_LOGD(TAG, "meter %u: unusable reply (%u bytes) on %s %u", this->slot_index_,
+           (unsigned) response_pdu.size(),
+           this->poll_ != MPOLL_IDLE ? "poll block" : "step",
+           this->poll_ != MPOLL_IDLE ? this->poll_ : this->step_);
+
+  if (this->poll_ != MPOLL_IDLE)
+    this->advance_poll_();
+  else
+    this->advance_(false);
 }
 
 void GrowattMeter::dump_config() {

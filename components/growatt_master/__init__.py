@@ -161,7 +161,7 @@ GrowattMeterIntervalNumber = ns.class_(
 GrowattPhaseCountSelect = ns.class_("GrowattPhaseCountSelect", select.Select)
 GrowattStringsSelect = ns.class_("GrowattStringsSelect", select.Select)
 GrowattAddressTool = ns.class_(
-    "GrowattAddressTool", cg.Component, modbus.ModbusDevice
+    "GrowattAddressTool", cg.Component, modbus.ModbusClientDevice
 )
 GrowattAddressNumber = ns.class_("GrowattAddressNumber", number.Number)
 GrowattAddressButton = ns.class_("GrowattAddressButton", button.Button)
@@ -646,7 +646,7 @@ def _inverter_schema():
         cv.GenerateID(): cv.declare_id(GrowattInverter),
         # Overrides the bus this device type routes to, for the odd unit that
         # sits on the other line.
-        cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
+        cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.ModbusClient),
         # 0 or omitted = slot not present. The value stored in flash takes
         # precedence at boot, so this is only the first-boot default.
         # The address is an entity rather than a fixed value: it lives in
@@ -788,7 +788,7 @@ def _meter_schema():
         cv.GenerateID(): cv.declare_id(GrowattMeter),
         # Overrides the bus this device type routes to, for the odd unit that
         # sits on the other line.
-        cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
+        cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.ModbusClient),
         # 0 or omitted = meter not present. Flash wins at boot.
         # Eastron specifies 1..247 for the whole SDM family, so there is
         # nothing above that to reach. 0 marks the slot empty.
@@ -849,7 +849,7 @@ CONFIG_SCHEMA = cv.All(
             # One bus for everything, or one per device type. Keeping the
             # meter on its own bus means a mute inverter can no longer stall
             # the reading the controller depends on, and vice versa.
-            cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.Modbus),
+            cv.Optional(modbus.CONF_MODBUS_ID): cv.use_id(modbus.ModbusClient),
             # What happens once the meter is definitively gone. Stopping is
             # the safe default for an export limited site; the other two trade
             # some of that safety for not throwing away production during a
@@ -860,8 +860,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_OFFLINE_HOLD, default="5min"
             ): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_INVERTERS_MODBUS_ID): cv.use_id(modbus.Modbus),
-            cv.Optional(CONF_METERS_MODBUS_ID): cv.use_id(modbus.Modbus),
+            cv.Optional(CONF_INVERTERS_MODBUS_ID): cv.use_id(modbus.ModbusClient),
+            cv.Optional(CONF_METERS_MODBUS_ID): cv.use_id(modbus.ModbusClient),
             cv.GenerateID(CONF_ADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
             cv.GenerateID(CONF_MADDR_TOOL_ID): cv.declare_id(GrowattAddressTool),
             cv.Optional(CONF_MADDR_FROM): _box_number(

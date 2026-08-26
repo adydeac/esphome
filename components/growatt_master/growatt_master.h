@@ -11,6 +11,7 @@
 #include "esphome/components/button/button.h"
 #include <vector>
 #include <string>
+#include <span>
 #include <cmath>
 
 namespace esphome {
@@ -53,18 +54,30 @@ enum AddrToolStep : uint8_t {
 //
 // One instance per bus. A ModbusClientDevice belongs to exactly one bus, so a
 // hub spanning two of them cannot be the tool itself - it owns them instead.
-// Base is ModbusDevice, not ModbusClientDevice. As of ESPHome 2026.8 the
-// on_modbus_data()/on_modbus_error() callbacks live only on ModbusDevice, which
-// is a deprecated compatibility shim translating the new on_response()/on_error()
-// into the old pair. It is scheduled for removal in 2027.2.0, so this component
-// has to migrate to the typed callbacks and the read_*/write_* helpers before
-// then; the Python side already declared modbus.ModbusDevice, which is why the
-// two sides disagreed.
-class GrowattAddressTool : public Component, public modbus::ModbusDevice {
+//
+// The probe deliberately treats an exception as a positive result: an answer of
+// any shape proves something is listening at the target address. That is why
+// the read callback below inspects status rather than assuming success, and why
+// on_custom_response() also counts as an answer - a malformed reply is still a
+// reply, and the address is still taken.
+class GrowattAddressTool : public Component, public modbus::ModbusClientDevice {
  public:
   void loop() override;
-  void on_modbus_data(const std::vector<uint8_t> &data) override;
-  void on_modbus_error(uint8_t function_code, uint8_t exception_code) override;
+  // Reads (the probe) and writes (the address change) each land in their own
+  // callback, success and exception alike, with the outcome in status.
+  void on_read_registers(modbus::EntityType entity_type, uint16_t start_address,
+                         std::span<const uint16_t> registers,
+                         modbus::ResponseStatus status) override;
+  void on_write_single_register(uint16_t address, uint16_t value,
+                                modbus::ResponseStatus status) override;
+  void on_write_multiple_registers(uint16_t start_address,
+                                   std::span<const uint16_t> registers,
+                                   modbus::ResponseStatus status) override;
+  // A non-conformant reply never reaches the typed callbacks above; without
+  // this the tool would sit in waiting_ until its own timeout.
+  void on_custom_response(std::span<const uint8_t> request_pdu,
+                          std::span<const uint8_t> response_pdu,
+                          modbus::ResponseStatus status) override;
   float get_setup_priority() const override { return setup_priority::DATA - 2; }
 
   void set_from(uint8_t a) { this->from_ = a; }
@@ -79,6 +92,9 @@ class GrowattAddressTool : public Component, public modbus::ModbusDevice {
  protected:
   void send_();
   void finish_(const char *status, bool ok);
+  // Shared tail of every terminal callback: an answer arrived, whatever its
+  // shape. ok_write says whether a write was acknowledged without an exception.
+  void answered_(bool ok_write);
 
   AddrToolStep step_{ADDR_IDLE};
   uint8_t from_{0};

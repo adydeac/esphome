@@ -112,14 +112,12 @@ struct MeterTriple {
   sensor::Sensor *power_factor{nullptr};
 };
 
-// Base is ModbusDevice, not ModbusClientDevice. As of ESPHome 2026.8 the
-// on_modbus_data()/on_modbus_error() callbacks live only on ModbusDevice, which
-// is a deprecated compatibility shim translating the new on_response()/on_error()
-// into the old pair. It is scheduled for removal in 2027.2.0, so this component
-// has to migrate to the typed callbacks and the read_*/write_* helpers before
-// then; the Python side already declared modbus.ModbusDevice, which is why the
-// two sides disagreed.
-class GrowattMeter : public PollingComponent, public modbus::ModbusDevice {
+// One callback for both register tables. The identification sequence reads
+// holding registers for the id block and input registers for the main block, so
+// splitting into on_read_holding_registers()/on_read_input_registers() would
+// mean two entry points into one state machine for no gain: the step being
+// served already says which table was asked for.
+class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice {
  public:
   void setup() override;
   void loop() override;
@@ -127,8 +125,15 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusDevice {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  void on_modbus_data(const std::vector<uint8_t> &data) override;
-  void on_modbus_error(uint8_t function_code, uint8_t exception_code) override;
+  // Success and exception both land here, the outcome in status.
+  void on_read_registers(modbus::EntityType entity_type, uint16_t start_address,
+                         std::span<const uint16_t> data,
+                         modbus::ResponseStatus status) override;
+  // Replies that do not match the request's shape are diverted here instead of
+  // being delivered short; see the definition.
+  void on_custom_response(std::span<const uint8_t> request_pdu,
+                          std::span<const uint8_t> response_pdu,
+                          modbus::ResponseStatus status) override;
 
   // ------------------------------ public API ------------------------------
   void change_address(uint8_t addr);
@@ -189,16 +194,18 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusDevice {
 
  protected:
   void try_send_();
+  // Starts the wait when a request was accepted; handles the refusal otherwise.
+  bool queued_(bool ok);
   void send_step_();
   void advance_(bool ok);
   void start_poll_();
   void send_poll_();
   void advance_poll_();
-  void parse_main_(const std::vector<uint8_t> &data);
-  void parse_slow_(const std::vector<uint8_t> &data);
-  void parse_line_(const std::vector<uint8_t> &data);
-  void parse_energy_(const std::vector<uint8_t> &data);
-  void detect_phases_(const std::vector<uint8_t> &data);
+  void parse_main_(std::span<const uint16_t> data);
+  void parse_slow_(std::span<const uint16_t> data);
+  void parse_line_(std::span<const uint16_t> data);
+  void parse_energy_(std::span<const uint16_t> data);
+  void detect_phases_(std::span<const uint16_t> data);
   void publish_info_();
   // Republished on every change, not just at boot: the address is editable and
   // a stale entity looks authoritative while being wrong.

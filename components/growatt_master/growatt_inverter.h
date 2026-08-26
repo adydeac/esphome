@@ -403,14 +403,12 @@ struct SensorTriple {
   sensor::Sensor *power{nullptr};
 };
 
-// Base is ModbusDevice, not ModbusClientDevice. As of ESPHome 2026.8 the
-// on_modbus_data()/on_modbus_error() callbacks live only on ModbusDevice, which
-// is a deprecated compatibility shim translating the new on_response()/on_error()
-// into the old pair. It is scheduled for removal in 2027.2.0, so this component
-// has to migrate to the typed callbacks and the read_*/write_* helpers before
-// then; the Python side already declared modbus.ModbusDevice, which is why the
-// two sides disagreed.
-class GrowattInverter : public PollingComponent, public modbus::ModbusDevice {
+// One read callback for both register tables. The identification sequence
+// alternates between them - input registers for the live block, holding for the
+// info block - so a split into on_read_input_registers()/on_read_holding_
+// registers() would put two doors on one state machine while the step being
+// served already records which table was asked for.
+class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevice {
  public:
   void setup() override;
   void loop() override;
@@ -418,10 +416,25 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusDevice {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  void on_modbus_data(const std::vector<uint8_t> &data) override;
-  // Exception replies arrive here. Treating them explicitly avoids waiting for
-  // the full timeout on registers the model does not implement.
-  void on_modbus_error(uint8_t function_code, uint8_t exception_code) override;
+  // Data and exceptions arrive together, the outcome in status. Handling an
+  // exception explicitly avoids waiting out the full timeout on registers the
+  // model does not implement.
+  void on_read_registers(modbus::EntityType entity_type, uint16_t start_address,
+                         std::span<const uint16_t> data,
+                         modbus::ResponseStatus status) override;
+  // Write acknowledgements have their own callbacks, which is what keeps a
+  // rejected write out of the identification state machine structurally rather
+  // than by remembering to check writing_ before anything else.
+  void on_write_single_register(uint16_t address, uint16_t value,
+                                modbus::ResponseStatus status) override;
+  void on_write_multiple_registers(uint16_t start_address,
+                                   std::span<const uint16_t> registers,
+                                   modbus::ResponseStatus status) override;
+  // Replies that do not match the request's shape land here instead of being
+  // delivered short; see the definition.
+  void on_custom_response(std::span<const uint8_t> request_pdu,
+                          std::span<const uint8_t> response_pdu,
+                          modbus::ResponseStatus status) override;
 
   // ------------------ public API, callable from YAML lambdas ------------------
   void change_address(uint8_t addr);
@@ -752,27 +765,35 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusDevice {
 
  protected:
   void try_send_();
+  // Starts the wait when a request was accepted into the queue, and unwinds the
+  // transaction the way a timeout would when it was refused.
+  bool queued_(bool ok);
+  // Shared preamble of every terminal callback: refreshes liveness and reports
+  // whether this is a frame we are actually waiting for.
+  bool answered_();
+  // Retires the write at the head of the queue, acknowledged or rejected.
+  void finish_write_(modbus::ResponseStatus status);
   void send_step_();
   void advance_(bool ok);
   void publish_info_();
   void apply_overrides_();
-  void detect_from_live_(const std::vector<uint8_t> &data);
+  void detect_from_live_(std::span<const uint16_t> data);
   void send_dump_chunk_();
-  void handle_dump_(const std::vector<uint8_t> &data);
+  void handle_dump_(std::span<const uint16_t> data);
   void dump_skip_range_();
   void save_prefs_();
 
   void start_poll_();
   void send_poll_();
   void advance_poll_();
-  void parse_fast_main_(const std::vector<uint8_t> &data);
-  void parse_fast_status_(const std::vector<uint8_t> &data);
-  void parse_slow_main_(const std::vector<uint8_t> &data);
-  void parse_fast_bat_(const std::vector<uint8_t> &data);
-  void parse_fast_ups_(const std::vector<uint8_t> &data);
-  void parse_device_info_(const std::vector<uint8_t> &data);
-  void parse_storage_(const std::vector<uint8_t> &data);
-  void parse_settings_(const std::vector<uint8_t> &data);
+  void parse_fast_main_(std::span<const uint16_t> data);
+  void parse_fast_status_(std::span<const uint16_t> data);
+  void parse_slow_main_(std::span<const uint16_t> data);
+  void parse_fast_bat_(std::span<const uint16_t> data);
+  void parse_fast_ups_(std::span<const uint16_t> data);
+  void parse_device_info_(std::span<const uint16_t> data);
+  void parse_storage_(std::span<const uint16_t> data);
+  void parse_settings_(std::span<const uint16_t> data);
   void publish_derived_();
   void publish_settings_();
   void apply_protection_limits_();
@@ -786,7 +807,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusDevice {
   // Publishes any register backed select or switch whose address falls inside
   // the block that was just read, so they pick up values from whichever read
   // covers them rather than only from the first holding group.
-  void publish_reg_entities_(const std::vector<uint8_t> &data, uint16_t base,
+  void publish_reg_entities_(std::span<const uint16_t> data, uint16_t base,
                              uint16_t count);
 
   bool queue_write_(uint8_t function, uint16_t address, const uint16_t *values,

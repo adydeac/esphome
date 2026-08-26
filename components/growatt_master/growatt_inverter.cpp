@@ -27,21 +27,24 @@ static const uint8_t KIND_VOLTAGE = 0;
 static const uint8_t KIND_CURRENT = 1;
 static const uint8_t KIND_POWER = 2;
 
-static inline uint16_t reg16(const std::vector<uint8_t> &d, size_t reg) {
-  return encode_uint16(d[reg * 2], d[reg * 2 + 1]);
+// Registers arrive in host byte order, so the wire-order assembly these helpers
+// used to do is already done. The call sites were always register indexed, which
+// is why only the helpers change shape and not the hundreds of uses.
+static inline uint16_t reg16(std::span<const uint16_t> d, size_t reg) {
+  return d[reg];
 }
 
-static inline uint32_t reg32(const std::vector<uint8_t> &d, size_t reg) {
+static inline uint32_t reg32(std::span<const uint16_t> d, size_t reg) {
   return (((uint32_t) reg16(d, reg)) << 16) | reg16(d, reg + 1);
 }
 
-static inline void pub1(sensor::Sensor *s, const std::vector<uint8_t> &d,
+static inline void pub1(sensor::Sensor *s, std::span<const uint16_t> d,
                         size_t reg, float unit) {
   if (s != nullptr)
     s->publish_state(reg16(d, reg) * unit);
 }
 
-static inline void pub2(sensor::Sensor *s, const std::vector<uint8_t> &d,
+static inline void pub2(sensor::Sensor *s, std::span<const uint16_t> d,
                         size_t reg, float unit) {
   if (s != nullptr)
     s->publish_state(reg32(d, reg) * unit);
@@ -53,13 +56,18 @@ static inline void pub_val(sensor::Sensor *s, float v) {
 }
 
 // Extract printable ASCII from a register range, trailing spaces removed.
-static std::string ascii_from(const std::vector<uint8_t> &d, size_t reg,
+// Each register carries two characters, the first in the high byte - the wire
+// order, which survives the conversion to host order as the word's own layout.
+static std::string ascii_from(std::span<const uint16_t> d, size_t reg,
                               size_t count) {
   std::string s;
-  for (size_t i = 0; i < count * 2; i++) {
-    char c = (char) d[reg * 2 + i];
-    if (c >= 32 && c <= 126)
-      s += c;
+  for (size_t i = 0; i < count; i++) {
+    const uint16_t w = d[reg + i];
+    const char pair[2] = {(char) (w >> 8), (char) (w & 0xFF)};
+    for (char c : pair) {
+      if (c >= 32 && c <= 126)
+        s += c;
+    }
   }
   while (!s.empty() && s.back() == ' ')
     s.pop_back();
@@ -429,10 +437,61 @@ void GrowattInverter::update_health_() {
   }
 }
 
+// A refused request produces no callback at all, so starting the wait would
+// stall this slot for the full timeout with nothing coming. Every send path
+// reports its outcome here. The recovery deliberately mirrors loop()'s timeout
+// handling case for case, including the order - a write is only abandoned after
+// the retry budget, exactly as a timed-out one is - so a refusal and a silence
+// leave the state machine in the same place.
+bool GrowattInverter::queued_(bool ok) {
+  if (ok) {
+    this->last_send_ = millis();
+    this->waiting_ = true;
+    return true;
+  }
+  this->waiting_ = false;
+  this->retries_++;
+  this->bus_release_ = millis();
+
+  if (this->probing_) {
+    this->probing_ = false;
+    this->retries_ = 0;
+    return false;
+  }
+
+  if (this->retries_ <= IDENT_MAX_RETRIES) {
+    ESP_LOGD(TAG, "slot %u: bus refused the request, retrying (%u/%u)",
+             this->slot_index_, this->retries_, IDENT_MAX_RETRIES);
+    this->want_send_ = true;
+    return false;
+  }
+
+  ESP_LOGW(TAG, "slot %u: bus kept refusing the request, abandoning it",
+           this->slot_index_);
+
+  if (this->writing_) {
+    this->writing_ = false;
+    this->write_head_ = (this->write_head_ + 1) % WRITE_QUEUE_SIZE;
+    this->write_count_--;
+    this->retries_ = 0;
+    this->want_send_ = this->write_count_ > 0;
+    return false;
+  }
+  if (this->dump_active_) {
+    this->dump_skip_range_();
+    return false;
+  }
+  if (this->poll_ != POLL_IDLE) {
+    this->advance_poll_();
+    return false;
+  }
+  this->advance_(false);
+  return false;
+}
+
 void GrowattInverter::send_probe_() {
-  this->send(CMD_READ_INPUT, PROBE_BASE, PROBE_CNT);
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  if (!this->queued_(this->read_input_registers(PROBE_BASE, PROBE_CNT)))
+    return;
   ESP_LOGV(TAG, "slot %u: probing", this->slot_index_);
 }
 
@@ -570,64 +629,66 @@ void GrowattInverter::loop() {
 }
 
 void GrowattInverter::send_step_() {
+  bool ok;
   switch (this->step_) {
     case IDENT_START:
       this->step_ = IDENT_LIVE;
       // fallthrough
     case IDENT_LIVE:
-      this->send(CMD_READ_INPUT, IN_BASE, FIRST_GROUP_CNT);
+      ok = this->read_input_registers(IN_BASE, FIRST_GROUP_CNT);
       break;
     case IDENT_INFO:
-      this->send(CMD_READ_HOLDING, HOLD_BASE, FIRST_GROUP_CNT);
+      ok = this->read_holding_registers(HOLD_BASE, FIRST_GROUP_CNT);
       break;
     case IDENT_TYPE:
-      this->send(CMD_READ_HOLDING, REG_TYPE_BASE, REG_TYPE_CNT);
+      ok = this->read_holding_registers(REG_TYPE_BASE, REG_TYPE_CNT);
       break;
     case IDENT_CAPS:
-      this->send(CMD_READ_HOLDING, REG_PVSTRSCAN, REG_CAPS_CNT);
+      ok = this->read_holding_registers(REG_PVSTRSCAN, REG_CAPS_CNT);
       break;
     case IDENT_STORAGE:
-      this->send(CMD_READ_HOLDING, REG_STORAGE_BASE, REG_STORAGE_CNT);
+      ok = this->read_holding_registers(REG_STORAGE_BASE, REG_STORAGE_CNT);
       break;
     case IDENT_BATTERY:
-      this->send(CMD_READ_INPUT, REG_BAT_BASE, REG_BAT_CNT);
+      ok = this->read_input_registers(REG_BAT_BASE, REG_BAT_CNT);
       break;
     case IDENT_SETTINGS:
-      this->send(CMD_READ_HOLDING, HO_SETTINGS_BASE, HO_SETTINGS_CNT);
+      ok = this->read_holding_registers(HO_SETTINGS_BASE, HO_SETTINGS_CNT);
       break;
     default:
       return;
   }
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  if (!this->queued_(ok))
+    return;
   ESP_LOGV(TAG, "slot %u: sent step %u", this->slot_index_, this->step_);
 }
 
 void GrowattInverter::send_poll_() {
+  bool ok;
   switch (this->poll_) {
     case POLL_FAST_MAIN:
-      this->send(CMD_READ_INPUT, POLL_FAST_MAIN_BASE, POLL_FAST_MAIN_CNT);
+      ok = this->read_input_registers(POLL_FAST_MAIN_BASE, POLL_FAST_MAIN_CNT);
       break;
     case POLL_FAST_STATUS:
-      this->send(CMD_READ_INPUT, POLL_FAST_STATUS_BASE, POLL_FAST_STATUS_CNT);
+      ok = this->read_input_registers(POLL_FAST_STATUS_BASE, POLL_FAST_STATUS_CNT);
       break;
     case POLL_FAST_BAT:
-      this->send(CMD_READ_INPUT, POLL_FAST_BAT_BASE, POLL_FAST_BAT_CNT);
+      ok = this->read_input_registers(POLL_FAST_BAT_BASE, POLL_FAST_BAT_CNT);
       break;
     case POLL_FAST_UPS:
-      this->send(CMD_READ_INPUT, POLL_FAST_UPS_BASE, POLL_FAST_UPS_CNT);
+      ok = this->read_input_registers(POLL_FAST_UPS_BASE, POLL_FAST_UPS_CNT);
       break;
     case POLL_SLOW_MAIN:
-      this->send(CMD_READ_INPUT, POLL_SLOW_MAIN_BASE, POLL_SLOW_MAIN_CNT);
+      ok = this->read_input_registers(POLL_SLOW_MAIN_BASE, POLL_SLOW_MAIN_CNT);
       break;
     case POLL_SLOW_STOR:
-      this->send(CMD_READ_INPUT, POLL_SLOW_STOR_BASE, POLL_SLOW_STOR_CNT);
+      ok = this->read_input_registers(POLL_SLOW_STOR_BASE, POLL_SLOW_STOR_CNT);
       break;
     default:
       return;
   }
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  if (!this->queued_(ok))
+    return;
   ESP_LOGV(TAG, "slot %u: sent poll block %u", this->slot_index_, this->poll_);
 }
 
@@ -729,7 +790,7 @@ void GrowattInverter::advance_poll_() {
 
 // ------------------------------ identification ------------------------------
 
-void GrowattInverter::detect_from_live_(const std::vector<uint8_t> &data) {
+void GrowattInverter::detect_from_live_(std::span<const uint16_t> data) {
   uint8_t phases = 0;
   for (uint8_t i = 0; i < 3; i++) {
     if (reg16(data, IN_VAC[i]) >= VOLTAGE_PRESENT)
@@ -760,7 +821,7 @@ void GrowattInverter::detect_from_live_(const std::vector<uint8_t> &data) {
   }
 }
 
-void GrowattInverter::parse_device_info_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_device_info_(std::span<const uint16_t> data) {
   this->caps_.dtc = reg16(data, HO_DTC);
   this->caps_.serial = ascii_from(data, HO_SERIAL, HO_SERIAL_CNT);
 
@@ -854,7 +915,7 @@ void GrowattInverter::parse_device_info_(const std::vector<uint8_t> &data) {
 // ------------------------------ poll parsing ------------------------------
 
 // Fast block, input 0..56. Everything the control logic needs.
-void GrowattInverter::parse_fast_main_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_fast_main_(std::span<const uint16_t> data) {
   uint16_t status = reg16(data, IN_STATUS);
   pub_val(this->status_code_, status);
   pub_text(this->status_ts_, status_text(status));
@@ -946,7 +1007,7 @@ void GrowattInverter::parse_fast_main_(const std::vector<uint8_t> &data) {
 
 // Fast status block, input 101..105. Small on purpose: it runs on every cycle
 // so the controller knows whether the inverter can follow a higher setpoint.
-void GrowattInverter::parse_fast_status_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_fast_status_(std::span<const uint16_t> data) {
   // The document specifies 1 % per count here. Earlier YAML based setups often
   // used 0.1; verify against the inverter display if the value looks off.
   this->real_percent_val_ = reg16(data, 0);  // 101
@@ -968,7 +1029,7 @@ void GrowattInverter::parse_fast_status_(const std::vector<uint8_t> &data) {
 }
 
 // Slow block, input 57..124. Counters, temperatures and diagnostics.
-void GrowattInverter::parse_slow_main_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_slow_main_(std::span<const uint16_t> data) {
   const uint8_t B = POLL_SLOW_MAIN_BASE;  // rebase absolute addresses
 
   // work time is counted in half seconds, published as hours
@@ -1009,7 +1070,7 @@ void GrowattInverter::parse_slow_main_(const std::vector<uint8_t> &data) {
 }
 
 // Fast storage block, input 1009..1014.
-void GrowattInverter::parse_fast_bat_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_fast_bat_(std::span<const uint16_t> data) {
   pub2(this->bat_discharge_power_, data, 0, ONE_DEC);  // 1009
   pub2(this->bat_charge_power_, data, 2, ONE_DEC);     // 1011
   this->battery_voltage_v_ = reg16(data, 4) * ONE_DEC;  // 1013
@@ -1019,7 +1080,7 @@ void GrowattInverter::parse_fast_bat_(const std::vector<uint8_t> &data) {
 }
 
 // Fast UPS block, input 1067..1081. Also feeds the load average window.
-void GrowattInverter::parse_fast_ups_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_fast_ups_(std::span<const uint16_t> data) {
   // The frequency register reads 0 while the UPS output is idle, which is not
   // a frequency of zero. Publishing NaN marks the sensor unavailable instead.
   uint16_t freq = reg16(data, 0);  // 1067
@@ -1048,7 +1109,7 @@ void GrowattInverter::parse_fast_ups_(const std::vector<uint8_t> &data) {
   this->ups_load_avg_pct_ = acc * ONE_DEC / this->ups_avg_count_;
 }
 
-void GrowattInverter::parse_storage_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_storage_(std::span<const uint16_t> data) {
   // Slow storage block, input 1000..1096. Values already covered by the fast
   // blocks are simply refreshed here.
   pub1(this->system_work_mode_, data, ST_WORK_MODE, 1.0f);
@@ -1158,15 +1219,20 @@ bool GrowattInverter::queue_write_(uint8_t function, uint16_t address,
 
 void GrowattInverter::send_write_() {
   const PendingWrite &w = this->write_queue_[this->write_head_];
-  uint8_t payload[WINDOW_REGS * 2];
-  for (uint8_t i = 0; i < w.count; i++) {
-    payload[i * 2] = w.values[i] >> 8;
-    payload[i * 2 + 1] = w.values[i] & 0xFF;
-  }
-  this->send(w.function, w.address, w.count, w.count * 2, payload);
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  // Set before queueing, not after: on a refusal queued_() has to know a write
+  // is what it is unwinding, so it drops the right queue entry.
   this->writing_ = true;
+  bool ok;
+  if (w.function == CMD_WRITE_MULTI) {
+    // The helper takes host-order words and does the big-endian framing itself,
+    // which is what the hand-built payload byte pairs used to do here.
+    ok = this->write_multiple_registers(
+        w.address, std::span<const uint16_t>(w.values, w.count));
+  } else {
+    ok = this->write_single_register(w.address, w.values[0]);
+  }
+  if (!this->queued_(ok))
+    return;
   ESP_LOGI(TAG, "slot %u: write fn 0x%02X addr %u, %u register(s)",
            this->slot_index_, w.function, w.address, w.count);
 }
@@ -1606,7 +1672,7 @@ void GrowattInverter::set_register_select(uint16_t address, select::Select *s) {
   this->reg_select_count_++;
 }
 
-void GrowattInverter::publish_reg_entities_(const std::vector<uint8_t> &data,
+void GrowattInverter::publish_reg_entities_(std::span<const uint16_t> data,
                                             uint16_t base, uint16_t count) {
   for (uint8_t i = 0; i < this->reg_select_count_; i++) {
     uint16_t a = this->reg_select_addr_[i];
@@ -1791,7 +1857,7 @@ void GrowattInverter::set_setting_number(uint8_t field, number::Number *n) {
 
 // Reads back everything the UI can change so the entities start out matching
 // the inverter instead of showing zeros.
-void GrowattInverter::parse_settings_(const std::vector<uint8_t> &data) {
+void GrowattInverter::parse_settings_(std::span<const uint16_t> data) {
   // offsets relative to 1070
   for (uint8_t f = 0; f < SET_COUNT; f++) {
     uint16_t addr = SETTING_ADDR[f];
@@ -1859,15 +1925,16 @@ void GrowattInverter::send_dump_chunk_() {
   uint16_t remaining = r.count - this->dump_offset_;
   uint16_t n = remaining > DUMP_CHUNK ? DUMP_CHUNK : remaining;
 
-  this->send(r.function, r.start + this->dump_offset_, n);
-  this->last_send_ = millis();
-  this->waiting_ = true;
+  const modbus::EntityType table = r.function == CMD_READ_HOLDING
+                                       ? modbus::EntityType::HOLDING
+                                       : modbus::EntityType::INPUT_REGISTER;
+  this->queued_(this->read_entities(table, r.start + this->dump_offset_, n));
 }
 
-void GrowattInverter::handle_dump_(const std::vector<uint8_t> &data) {
+void GrowattInverter::handle_dump_(std::span<const uint16_t> data) {
   const DumpRange &r = DUMP_RANGES[this->dump_range_];
   uint16_t base = r.start + this->dump_offset_;
-  size_t regs = data.size() / 2;
+  size_t regs = data.size();
 
   char line[96];
   for (size_t i = 0; i < regs; i += 8) {
@@ -1907,78 +1974,95 @@ void GrowattInverter::dump_skip_range_() {
 
 // ------------------------------ responses ------------------------------
 
-void GrowattInverter::on_modbus_error(uint8_t function_code,
-                                      uint8_t exception_code) {
-  if (!this->is_enabled() || !this->waiting_)
-    return;
-
-  // An exception is still proof the inverter is alive and talking.
+// Every terminal callback starts here: an answer of any shape, from data to an
+// exception, proves the inverter is alive and talking. Returns false when the
+// frame is not one we are waiting for and should be ignored.
+bool GrowattInverter::answered_() {
+  if (!this->is_enabled())
+    return false;
   this->last_update_ = micros();
+  if (!this->waiting_)
+    return false;
   this->waiting_ = false;
   this->bus_release_ = millis();
+  return true;
+}
 
-  ESP_LOGD(TAG, "slot %u: exception %u on function 0x%02X", this->slot_index_,
-           exception_code, function_code);
+// Write acknowledgements now arrive in callbacks of their own, so a rejected
+// write can no longer fall through into the identification state machine the
+// way it once did - the routing does not depend on remembering to check
+// writing_ first, because a write response has nowhere else to go.
+void GrowattInverter::on_write_single_register(uint16_t address, uint16_t value,
+                                               modbus::ResponseStatus status) {
+  if (!this->answered_())
+    return;
+  this->finish_write_(status);
+}
 
-  // A write must be dealt with first: it is not part of the identification
-  // sequence, and letting it fall through would advance that state machine on
-  // the strength of an unrelated failure.
-  if (this->writing_) {
-    const PendingWrite &w = this->write_queue_[this->write_head_];
+void GrowattInverter::on_write_multiple_registers(
+    uint16_t start_address, std::span<const uint16_t> registers,
+    modbus::ResponseStatus status) {
+  if (!this->answered_())
+    return;
+  this->finish_write_(status);
+}
+
+void GrowattInverter::finish_write_(modbus::ResponseStatus status) {
+  // A write that was never sent as a write cannot be retired as one. This only
+  // fires if an echo outlives the transaction it belongs to.
+  if (!this->writing_) {
+    ESP_LOGD(TAG, "slot %u: write acknowledgement with no write pending",
+             this->slot_index_);
+    return;
+  }
+  const PendingWrite &w = this->write_queue_[this->write_head_];
+  if (modbus::succeeded(status)) {
+    ESP_LOGI(TAG, "slot %u: write to %u acknowledged", this->slot_index_,
+             w.address);
+  } else {
     ESP_LOGW(TAG,
              "slot %u: register %u rejected the write (exception %u); this "
              "model does not accept it, not trying again until the next "
              "identification",
-             this->slot_index_, w.address, exception_code);
+             this->slot_index_, w.address,
+             (unsigned) static_cast<uint8_t>(status.value()));
     this->mark_rejected_(w.address);
-    this->writing_ = false;
-    this->write_head_ = (this->write_head_ + 1) % WRITE_QUEUE_SIZE;
-    this->write_count_--;
-    this->retries_ = 0;
-    this->want_send_ = this->write_count_ > 0;
-    return;
   }
-
-  if (this->dump_active_) {
-    ESP_LOGI(TAG, "DUMP slot %u: range %u not implemented, skipping",
-             this->slot_index_, this->dump_range_);
-    this->dump_skip_range_();
-  } else if (this->poll_ != POLL_IDLE) {
-    this->advance_poll_();
-  } else {
-    this->advance_(false);
-  }
+  this->writing_ = false;
+  this->write_head_ = (this->write_head_ + 1) % WRITE_QUEUE_SIZE;
+  this->write_count_--;
+  this->retries_ = 0;
+  this->want_send_ = this->write_count_ > 0;
 }
 
-void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
-  if (!this->is_enabled())
+void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
+                                        uint16_t start_address,
+                                        std::span<const uint16_t> data,
+                                        modbus::ResponseStatus status) {
+  if (!this->answered_())
     return;
-
-  // Any frame from our address proves the inverter is alive.
-  this->last_update_ = micros();
-
-  if (!this->waiting_)
-    return;
-  this->waiting_ = false;
-  this->bus_release_ = millis();
 
   // A probe answering is all we needed; update_health_() notices the fresh
-  // timestamp on the next cycle and starts identification.
+  // timestamp on the next cycle and starts identification. An exception counts
+  // just as well: something replied.
   if (this->probing_) {
     this->probing_ = false;
     this->retries_ = 0;
     return;
   }
 
-  // A write echo just confirms the command; nothing to parse.
-  if (this->writing_) {
-    this->writing_ = false;
-    ESP_LOGI(TAG, "slot %u: write to %u acknowledged", this->slot_index_,
-             this->write_queue_[this->write_head_].address);
-    this->write_head_ = (this->write_head_ + 1) % WRITE_QUEUE_SIZE;
-    this->write_count_--;
-    this->retries_ = 0;
-    this->want_send_ = this->write_count_ > 0;
+  if (!modbus::succeeded(status)) {
+    ESP_LOGD(TAG, "slot %u: exception %u at register %u", this->slot_index_,
+             (unsigned) static_cast<uint8_t>(status.value()), start_address);
+    if (this->dump_active_) {
+      ESP_LOGI(TAG, "DUMP slot %u: range %u not implemented, skipping",
+               this->slot_index_, this->dump_range_);
+      this->dump_skip_range_();
+    } else if (this->poll_ != POLL_IDLE) {
+      this->advance_poll_();
+    } else {
+      this->advance_(false);
+    }
     return;
   }
 
@@ -1990,27 +2074,27 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
   if (this->poll_ != POLL_IDLE) {
     switch (this->poll_) {
       case POLL_FAST_MAIN:
-        if (data.size() >= POLL_FAST_MAIN_CNT * 2)
+        if (data.size() >= POLL_FAST_MAIN_CNT)
           this->parse_fast_main_(data);
         break;
       case POLL_FAST_STATUS:
-        if (data.size() >= POLL_FAST_STATUS_CNT * 2)
+        if (data.size() >= POLL_FAST_STATUS_CNT)
           this->parse_fast_status_(data);
         break;
       case POLL_FAST_BAT:
-        if (data.size() >= POLL_FAST_BAT_CNT * 2)
+        if (data.size() >= POLL_FAST_BAT_CNT)
           this->parse_fast_bat_(data);
         break;
       case POLL_FAST_UPS:
-        if (data.size() >= POLL_FAST_UPS_CNT * 2)
+        if (data.size() >= POLL_FAST_UPS_CNT)
           this->parse_fast_ups_(data);
         break;
       case POLL_SLOW_MAIN:
-        if (data.size() >= POLL_SLOW_MAIN_CNT * 2)
+        if (data.size() >= POLL_SLOW_MAIN_CNT)
           this->parse_slow_main_(data);
         break;
       case POLL_SLOW_STOR:
-        if (data.size() >= POLL_SLOW_STOR_CNT * 2)
+        if (data.size() >= POLL_SLOW_STOR_CNT)
           this->parse_storage_(data);
         break;
       default:
@@ -2022,17 +2106,17 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
 
   switch (this->step_) {
     case IDENT_LIVE: {
-      if (data.size() < FIRST_GROUP_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < FIRST_GROUP_CNT) { this->advance_(false); return; }
       this->detect_from_live_(data);
       break;
     }
     case IDENT_INFO: {
-      if (data.size() < FIRST_GROUP_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < FIRST_GROUP_CNT) { this->advance_(false); return; }
       this->parse_device_info_(data);
       break;
     }
     case IDENT_TYPE: {
-      if (data.size() < REG_TYPE_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < REG_TYPE_CNT) { this->advance_(false); return; }
       this->caps_.inv_type = ascii_from(data, OFF_INV_TYPE, OFF_INV_TYPE_CNT);
       pub_text(this->model_ts_, this->caps_.inv_type);
       pub_text(this->bootloader_ts_,
@@ -2047,7 +2131,7 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
       break;
     }
     case IDENT_CAPS: {
-      if (data.size() < REG_CAPS_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < REG_CAPS_CNT) { this->advance_(false); return; }
       this->caps_.bdc_count = reg16(data, 1) & 0xFF;
       this->caps_.battery_packs = reg16(data, 2) & 0xFF;
       ESP_LOGI(TAG, "slot %u: PvStrScan=%u, BDC=%u, PackNum=%u",
@@ -2056,7 +2140,7 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
       break;
     }
     case IDENT_STORAGE: {
-      if (data.size() < REG_STORAGE_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < REG_STORAGE_CNT) { this->advance_(false); return; }
       uint16_t acc = 0;
       for (uint8_t i = 0; i < REG_STORAGE_CHECK; i++)
         acc |= reg16(data, i);
@@ -2075,7 +2159,7 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
       break;
     }
     case IDENT_BATTERY: {
-      if (data.size() < REG_BAT_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < REG_BAT_CNT) { this->advance_(false); return; }
       uint16_t vbat = reg16(data, 0);
       uint16_t soc = reg16(data, 1);
       this->caps_.battery_soc = soc;
@@ -2089,7 +2173,7 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
       break;
     }
     case IDENT_SETTINGS: {
-      if (data.size() < HO_SETTINGS_CNT * 2) { this->advance_(false); return; }
+      if (data.size() < HO_SETTINGS_CNT) { this->advance_(false); return; }
       this->parse_settings_(data);
       break;
     }
@@ -2097,6 +2181,52 @@ void GrowattInverter::on_modbus_data(const std::vector<uint8_t> &data) {
       return;
   }
   this->advance_(true);
+}
+
+// A reply whose length does not match the request never reaches the typed
+// callbacks - the dispatcher diverts it here rather than handing over a short
+// block dressed as a complete one. The old code caught the same case with its
+// size guards and treated the block as unusable, so that is what happens here.
+// Overriding this matters beyond tidiness: the default implementation only
+// logs, which would leave this slot in waiting_ until its own timeout.
+void GrowattInverter::on_custom_response(std::span<const uint8_t> request_pdu,
+                                         std::span<const uint8_t> response_pdu,
+                                         modbus::ResponseStatus status) {
+  if (!this->answered_())
+    return;
+
+  ESP_LOGD(TAG, "slot %u: unusable reply (%u bytes), function 0x%02X",
+           this->slot_index_, (unsigned) response_pdu.size(),
+           request_pdu.empty() ? 0 : request_pdu[0]);
+
+  if (this->probing_) {
+    this->probing_ = false;
+    this->retries_ = 0;
+    return;
+  }
+  if (this->writing_) {
+    // Nothing was confirmed, so this is not an acknowledgement. Retired as a
+    // failure rather than marked rejected: a malformed frame says nothing about
+    // whether the model accepts the register, and blacklisting it on that
+    // evidence would suppress a write that might well work.
+    ESP_LOGW(TAG, "slot %u: write to %u answered with a malformed frame, dropping",
+             this->slot_index_, this->write_queue_[this->write_head_].address);
+    this->writing_ = false;
+    this->write_head_ = (this->write_head_ + 1) % WRITE_QUEUE_SIZE;
+    this->write_count_--;
+    this->retries_ = 0;
+    this->want_send_ = this->write_count_ > 0;
+    return;
+  }
+  if (this->dump_active_) {
+    this->dump_skip_range_();
+    return;
+  }
+  if (this->poll_ != POLL_IDLE) {
+    this->advance_poll_();
+    return;
+  }
+  this->advance_(false);
 }
 
 // ------------------------------ results ------------------------------
