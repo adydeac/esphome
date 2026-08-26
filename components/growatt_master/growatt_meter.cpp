@@ -576,10 +576,13 @@ void GrowattMeter::on_custom_response(std::span<const uint8_t> request_pdu,
   this->waiting_ = false;
   this->bus_release_ = millis();
 
+  // Cast each branch separately: MeterPoll and MeterStep are distinct enums, so
+  // the conditional has no common type to settle on.
   ESP_LOGD(TAG, "meter %u: unusable reply (%u bytes) on %s %u", this->slot_index_,
            (unsigned) response_pdu.size(),
            this->poll_ != MPOLL_IDLE ? "poll block" : "step",
-           this->poll_ != MPOLL_IDLE ? this->poll_ : this->step_);
+           this->poll_ != MPOLL_IDLE ? (unsigned) this->poll_
+                                     : (unsigned) this->step_);
 
   if (this->poll_ != MPOLL_IDLE)
     this->advance_poll_();
