@@ -465,8 +465,9 @@ Order of business in one cycle:
    to give way. Two rounds per phase: single phase units wired to that phase
    first, three phase units only after, because trimming a three phase unit
    also cuts phases that may still be importing.
-6. **One increase**, whichever inverter can absorb the most.
-7. **Rebalance**, only if nothing above applied.
+6. **Rebalance the phases**, trading single phase output down where a three
+   phase unit could use the freed headroom.
+7. **One increase**, whichever inverter can absorb the most.
 
 Two numbers do most of the work. `headroom_up_` asks how much more an inverter
 could deliver: a three phase unit spreads evenly, so it is bound by the phase
@@ -497,14 +498,27 @@ Three rules that came out of watching it misbehave:
 - **Raising output raises voltage**, so an inverter on a phase already near the
   high limit is skipped rather than pushed further.
 
-Rebalancing is the last resort and runs after the increase pass on purpose.
-When nothing can be raised, it is usually a three phase unit pinned by whichever
-phase has the least headroom — and single phase inverters loading the quieter
-phases are what keeps that headroom small. Giving up some of their output buys
-three times as much from a three phase unit. Every phase meaningfully below the
-busiest one is treated, because two lightly loaded phases block just as
-effectively as one, and it only proceeds if some three phase unit is actually
-able to take up the slack.
+Rebalancing runs *before* the increase pass, not after it.
+
+A three phase unit is usually pinned by whichever phase has the least headroom,
+and the single phase inverters loading the quieter phases are what keeps that
+headroom small. Giving up some of their output buys three times as much from a
+three phase unit. Every phase meaningfully below the busiest one is treated,
+because two lightly loaded phases block just as effectively as one.
+
+It used to run last, and that meant it almost never ran: the increase pass needs
+only a few watts of headroom on the tightest phase to justify a one percent
+step, so it consumed exactly the margin rebalancing needed to trigger, cycle
+after cycle. Over 22 logged control cycles it fired once — and that once took
+the tightest phase from 16 W of headroom to 626 W, the difference between three
+phase units being able to add 48 W and 1878 W.
+
+What makes it safe to run first is the target. Trading is bounded by what the
+three phase units can actually absorb, through `available_headroom()`, which is
+zero for a unit whose setpoint is not what holds it back. When nobody can take
+the slack the target collapses and nothing is traded. Without that bound, going
+first would walk the single phase units to zero chasing a deficit no one could
+use.
 
 **Grid voltage is watched from both ends.** The meter is the grid reference,
 but it is not the first to see a rise: the drop across the AC cabling means an
@@ -764,8 +778,10 @@ files change together, replace all of them.
 - Whether Growatt firmware genuinely requires periodic setpoint refreshes. The
   component rewrites every 60 s as a precaution; registers 42, 304 and 307
   relate to communication loss handling and would settle the question.
-- Whether the rebalancing gains are worth their complexity on a system whose
-  single phase inverter is small relative to the three phase ones.
+- Whether the rebalancing gains are worth their complexity now that it runs
+  first and is bounded by measured capability. The one thing not yet observed is
+  a full day of it: whether it settles, or whether it and the increase pass
+  trade the same watts back and forth around the threshold.
 
 ## Started but not built
 
@@ -797,9 +813,78 @@ never in the inverter, it was the voltage it measured. Whether to reduce there
 too, and whether that should be the offending unit alone or everything on its
 phases, is unsettled.
 
+**A rolling capability estimate, now built, has two loose ends.** It infers what
+an inverter could produce at 100 % from what it produces while our limit is what
+it is actually hitting, and the ratio test that gates it was validated against
+real data - an SPH clipping at 9-18 % extrapolated to within 90 W of the same
+figure four times, while a PV limited MOD gave answers spread three to one. What
+has not been checked is how it behaves across a day: whether an hour long window
+is right, whether a unit that is curtailed only briefly at dawn produces a
+useful estimate, and whether the estimate should decay rather than expire.
+
+The second loose end is the diagnostic hiding in the same arithmetic. A unit at
+100 % producing half its nameplate is not being limited by anything we did -
+that is shading, soiling, snow or a fault. The ratio is already computed; it is
+not yet exposed as anything a person would notice.
+
 **Meter model select as an entity.** The address moved out of YAML into an
 entity on both device types; the meter's model override did not, and there is
 no particular reason for the inconsistency beyond nobody having asked.
+
+## Where this is going
+
+Three directions, in the order they have to happen.
+
+### 1. Migrate off the deprecated modbus API - by February 2027
+
+Not optional and not far off. ESPHome 2027.2.0 removes both the `ModbusDevice`
+shim the three device classes currently derive from and the `send()` helper
+every transmission uses. The details are in "The modbus base class" above.
+
+Do it as one pass, and do it before anything else. It touches roughly twenty
+call sites plus every parse function, and it is much easier to tell a migration
+bug from a logic bug when only one of them is in flight.
+
+### 2. Modbus over the network
+
+ESPHome has no Modbus TCP support: the `modbus` component is RTU only, and a
+2023 feature request for TCP is still open. The 2026.8 overhaul that brought
+`modbus_client` stayed on RTU. Three external components exist and none of them
+is a drop in:
+
+- `modbus_bridge` (rosenrot00, davidrapan) is a transparent TCP-to-RTU bridge -
+  it exposes an RTU bus *to* the network, which is the opposite of what is
+  wanted here.
+- `esphome_modbus_tcp_master` (Gucioo) and `esphome_modbus_tcp` (creepystefan)
+  are real TCP clients, but each is a self-contained component with its own
+  sensor platforms, not a transport another component can sit on.
+
+That is the actual obstacle: this component derives from a modbus device base
+and depends on the hub for sending and for dispatching replies. Network
+transport means either a TCP hub presenting the same interface, or abstracting
+the transport here.
+
+Which is the second reason to migrate first. The typed callbacks and helpers
+are exactly the seam where transport is chosen, and once parsing works from
+`std::span<const uint16_t>` rather than raw byte vectors, where the words came
+from stops mattering.
+
+Also worth remembering when this is picked up: RS485 gives predictable latency,
+and that is not incidental to a controller whose job is to notice export within
+a few seconds. Anything that puts a broker, a WiFi hop or a retry policy in the
+control path trades a property that currently works for one that has to be
+measured.
+
+### 3. A name
+
+`solar-master` is unclaimed. The reservation is that "master" describes how the
+component talks - Modbus master - and direction 2 may well end that. A name
+built on an abandoned transport is a poor inheritance. Something naming the
+function instead would survive it: the distinctive thing here is coordinating
+several inverters from a single meter to avoid export, and increasingly, to
+place surplus somewhere useful.
+
+Worth choosing after direction 2 is settled, not before.
 
 ## Working with Claude on this
 
