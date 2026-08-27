@@ -1,0 +1,47 @@
+# Prototype wiring. The vendored `modbus` folder overrides the core component of
+# the same name, so `growatt_master` picks it up with no change to its own code.
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [modbus, modbus_tcp, growatt_master]
+
+esp32:
+  framework:
+    type: esp-idf
+
+# Meters stay on the local pair.
+uart:
+  id: uart_rs485
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+
+modbus:
+  - id: bus_rs485
+    uart_id: uart_rs485
+    send_wait_time: 1500ms
+    turnaround_time: 150ms
+
+# Inverters reached over the dongle.
+modbus_tcp:
+  - id: bus_tcp
+    host: 192.168.1.50
+    port: 502
+    send_wait_time: 2000ms
+    reconnect_interval: 5s
+
+growatt_master:
+  inverters_modbus_id: bus_tcp
+  meters_modbus_id: bus_rs485
+  max_inverters: 8
+  # ... unchanged
+
+# The diagnostic worth watching first.
+sensor:
+  - platform: template
+    name: "TCP late responses"
+    lambda: 'return id(bus_tcp).get_late_response_count();'
+    update_interval: 60s
+    entity_category: diagnostic
+    accuracy_decimals: 0
