@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 from esphome.components import modbus
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PORT
+from esphome.const import CONF_ID, CONF_PORT, Framework
 
 CODEOWNERS = ["@mikesnet"]
 # The vendored copy of the core component, which is where ModbusClientHub and the
@@ -40,7 +40,7 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
-    cv.only_with_esp_idf,
+    cv.only_with_framework(Framework.ESP_IDF),
 )
 
 
