@@ -628,6 +628,55 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   float get_normal_power() const { return this->normal_power_va_; }
   bool has_valid_normal_power() const { return this->normal_power_valid_; }
 
+  // ---------------------- fleet aggregate contributions ----------------------
+  // What this slot adds to the hub totals. A unit that has gone quiet keeps
+  // contributing its last known figures until it is declared offline, which is
+  // the same window the health machine uses to tell a comms glitch from a unit
+  // that has actually stopped. After that it contributes nothing, so the totals
+  // fall as units drop out instead of quoting numbers from hours ago.
+  bool contributes() const {
+    return this->is_enabled() && this->health_ != INV_OFFLINE;
+  }
+
+  /// Nameplate scaled by the configured rate ceiling, counted whatever the
+  /// unit's health. This is what is bolted to the roof and allowed to run: it
+  /// does not move when a unit stops answering, only when the ceiling is
+  /// re-configured or the nameplate is revised. Zero when the nameplate never
+  /// validated - a slot with a nonsense nameplate must not be counted at face
+  /// value.
+  float rated_capacity() const {
+    if (!this->is_enabled() || !this->normal_power_valid_)
+      return 0.0f;
+    return this->normal_power_va_ * this->max_power_rate_ / 100.0f;
+  }
+
+  /// The same figure, but only while the unit is still counted as present. Use
+  /// this for "what the live fleet is allowed to reach"; rated_capacity() for
+  /// "what is installed".
+  float installed_capacity() const {
+    return this->contributes() ? this->rated_capacity() : 0.0f;
+  }
+
+  /// What this unit looks able to deliver right now. The estimate only exists
+  /// while our own rate limit is what the unit is pressing against
+  /// (update_capability_); at 100 % and unconstrained there is nothing to infer,
+  /// so current output stands in - at full rate that is the capability actually
+  /// observable. Never NaN, so the sum stays defined with mixed slots.
+  float effective_capability() const {
+    if (!this->contributes())
+      return 0.0f;
+    if (!std::isnan(this->capability_w_))
+      return this->capability_w_;
+    return std::isnan(this->grid_power_w_) ? 0.0f : this->grid_power_w_;
+  }
+
+  /// Power being injected right now, zero once the unit is written off.
+  float contributed_power() const {
+    if (!this->contributes() || std::isnan(this->grid_power_w_))
+      return 0.0f;
+    return this->grid_power_w_;
+  }
+
   // ---------------------- battery pack geometry (configurable) ----------------
   // Defaults match Growatt ARK 2.5 modules. Community hardware differs, so
   // these must not be hardcoded inside the derived calculations.

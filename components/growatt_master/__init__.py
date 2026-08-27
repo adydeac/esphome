@@ -927,6 +927,29 @@ CONFIG_SCHEMA = cv.All(
                 unit_of_measurement=_W, accuracy_decimals=1,
                 device_class=_DW, state_class=_M,
             ),
+            # Fleet totals, summed across the inverter slots. A slot stops
+            # contributing once it is declared offline, so these fall as units
+            # drop out rather than quoting stale figures.
+            cv.Optional("installed_capacity"): sensor.sensor_schema(
+                unit_of_measurement=_W, accuracy_decimals=0,
+                device_class=_DW, state_class=_M,
+                icon="mdi:solar-panel-large",
+            ),
+            cv.Optional("total_capacity"): sensor.sensor_schema(
+                unit_of_measurement=_W, accuracy_decimals=0,
+                device_class=_DW, state_class=_M,
+                icon="mdi:solar-power-variant",
+            ),
+            cv.Optional("total_capability"): sensor.sensor_schema(
+                unit_of_measurement=_W, accuracy_decimals=0,
+                device_class=_DW, state_class=_M,
+                icon="mdi:solar-power-variant-outline",
+            ),
+            cv.Optional("total_power"): sensor.sensor_schema(
+                unit_of_measurement=_W, accuracy_decimals=1,
+                device_class=_DW, state_class=_M,
+                icon="mdi:solar-power",
+            ),
             cv.Optional("meter_state"): text_sensor.text_sensor_schema(
                 icon="mdi:meter-electric"
             ),
@@ -1097,6 +1120,10 @@ async def to_code(config):
         ("meter_export", "set_meter_export"),
         ("meter_import_average", "set_meter_import_avg"),
         ("meter_export_average", "set_meter_export_avg"),
+        ("installed_capacity", "set_installed_capacity"),
+        ("total_capacity", "set_total_capacity"),
+        ("total_capability", "set_total_capability"),
+        ("total_power", "set_total_power"),
     ):
         if key in config:
             sens = await sensor.new_sensor(config[key])

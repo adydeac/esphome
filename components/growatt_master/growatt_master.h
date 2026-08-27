@@ -276,6 +276,10 @@ class GrowattHub : public PollingComponent {
   void set_meter_export(sensor::Sensor *s) { this->export_sens_ = s; }
   void set_meter_import_avg(sensor::Sensor *s) { this->import_avg_sens_ = s; }
   void set_meter_export_avg(sensor::Sensor *s) { this->export_avg_sens_ = s; }
+  void set_installed_capacity(sensor::Sensor *s) { this->installed_capacity_sens_ = s; }
+  void set_total_capacity(sensor::Sensor *s) { this->total_capacity_sens_ = s; }
+  void set_total_capability(sensor::Sensor *s) { this->total_capability_sens_ = s; }
+  void set_total_power(sensor::Sensor *s) { this->total_power_sens_ = s; }
   void set_meter_state(text_sensor::TextSensor *ts) { this->state_ts_ = ts; }
 
   // Mirrors what the controller believes about the mains, for observability.
@@ -293,6 +297,8 @@ class GrowattHub : public PollingComponent {
   void publish_settings_();
   void update_meter_health_();
   void update_aggregates_();
+  // Sums the per slot contributions; independent of meter health.
+  void update_fleet_totals_();
   void update_conditions_();
   void control_power_();
   void set_all_(float pct, const char *reason);
@@ -345,6 +351,10 @@ class GrowattHub : public PollingComponent {
   sensor::Sensor *export_sens_{nullptr};
   sensor::Sensor *import_avg_sens_{nullptr};
   sensor::Sensor *export_avg_sens_{nullptr};
+  sensor::Sensor *installed_capacity_sens_{nullptr};
+  sensor::Sensor *total_capacity_sens_{nullptr};
+  sensor::Sensor *total_capability_sens_{nullptr};
+  sensor::Sensor *total_power_sens_{nullptr};
   text_sensor::TextSensor *state_ts_{nullptr};
 
   binary_sensor::BinarySensor *bs_grid_{nullptr};

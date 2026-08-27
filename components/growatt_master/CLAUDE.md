@@ -465,9 +465,8 @@ Order of business in one cycle:
    to give way. Two rounds per phase: single phase units wired to that phase
    first, three phase units only after, because trimming a three phase unit
    also cuts phases that may still be importing.
-6. **Rebalance the phases**, trading single phase output down where a three
-   phase unit could use the freed headroom.
-7. **One increase**, whichever inverter can absorb the most.
+6. **One increase**, whichever inverter can absorb the most.
+7. **Rebalance**, only if nothing above applied.
 
 Two numbers do most of the work. `headroom_up_` asks how much more an inverter
 could deliver: a three phase unit spreads evenly, so it is bound by the phase
@@ -498,27 +497,14 @@ Three rules that came out of watching it misbehave:
 - **Raising output raises voltage**, so an inverter on a phase already near the
   high limit is skipped rather than pushed further.
 
-Rebalancing runs *before* the increase pass, not after it.
-
-A three phase unit is usually pinned by whichever phase has the least headroom,
-and the single phase inverters loading the quieter phases are what keeps that
-headroom small. Giving up some of their output buys three times as much from a
-three phase unit. Every phase meaningfully below the busiest one is treated,
-because two lightly loaded phases block just as effectively as one.
-
-It used to run last, and that meant it almost never ran: the increase pass needs
-only a few watts of headroom on the tightest phase to justify a one percent
-step, so it consumed exactly the margin rebalancing needed to trigger, cycle
-after cycle. Over 22 logged control cycles it fired once — and that once took
-the tightest phase from 16 W of headroom to 626 W, the difference between three
-phase units being able to add 48 W and 1878 W.
-
-What makes it safe to run first is the target. Trading is bounded by what the
-three phase units can actually absorb, through `available_headroom()`, which is
-zero for a unit whose setpoint is not what holds it back. When nobody can take
-the slack the target collapses and nothing is traded. Without that bound, going
-first would walk the single phase units to zero chasing a deficit no one could
-use.
+Rebalancing is the last resort and runs after the increase pass on purpose.
+When nothing can be raised, it is usually a three phase unit pinned by whichever
+phase has the least headroom — and single phase inverters loading the quieter
+phases are what keeps that headroom small. Giving up some of their output buys
+three times as much from a three phase unit. Every phase meaningfully below the
+busiest one is treated, because two lightly loaded phases block just as
+effectively as one, and it only proceeds if some three phase unit is actually
+able to take up the slack.
 
 **Grid voltage is watched from both ends.** The meter is the grid reference,
 but it is not the first to see a rise: the drop across the AC cabling means an
@@ -590,6 +576,50 @@ The same thresholds, widened by `inverter_protection_margin` (default 10 %),
 are what gets written into each inverter's own trip registers, so there is room
 to react before the hardware disconnects and locks us out for minutes.
 
+## Fleet totals
+
+Four optional hub sensors sum across the inverter slots: `installed_capacity`,
+`total_capacity`, `total_capability` and `total_power`. Each slot's contribution
+is a property of the inverter (`rated_capacity()`, `installed_capacity()`,
+`effective_capability()`, `contributed_power()`), so the arithmetic lives in one
+place, and none of them returns NaN - the sums stay defined however mixed the
+fleet is.
+
+- **`installed_capacity`** - nameplate × the configured rate ceiling, counted
+  whatever the unit's health. What is bolted to the roof and allowed to run. It
+  moves only when the ceiling is re-configured or a nameplate is revised.
+- **`total_capacity`** - the same figure, but only for units still counted as
+  present. The difference between the two is capacity lost to units that have
+  dropped out, which is the most useful line on a graph in the set.
+- **`total_capability`** - what the live fleet looks able to deliver now.
+- **`total_power`** - what it is injecting now.
+
+Two guards apply to every contribution: a slot at address 0 counts nothing, and
+a slot whose nameplate never validated counts zero rather than counting a
+nonsense figure at face value. If an `installed_capacity` comes out lower than
+expected, the second one is where to look.
+
+**Capability is an estimate with a lifetime, not a property.** It can only be
+inferred while our own rate limit is what the unit is pressing against
+(`rate_binding_` in `update_capability_()`); at 100 % and unconstrained there is
+nothing to infer, and the old estimate expires after `cap_window_ms_`. So
+`effective_capability()` falls back to current output when no estimate exists -
+at full rate that is the capability actually observable - and to zero only when
+the unit contributes nothing at all. Expect `total_capability` to sit level with
+`total_power` on a sunny, unconstrained day; the two separate as soon as the
+controller starts limiting, and the gap between them is the headroom.
+
+**A unit that goes quiet keeps its last figures until it is declared offline**,
+reusing the health machine's own window rather than adding a parameter. `STALLED`
+still contributes; `OFFLINE` contributes nothing. Without that cutoff a unit
+that died at 1000 W would keep adding 1000 W forever, and the totals would stay
+inflated exactly when you are looking at them to find out what dropped.
+
+The totals are published before `update_aggregates_()` takes its meter health
+early return. Losing the meter stops the control loop, but production continues
+and is still worth reporting - otherwise the sensors would vanish during the
+very fault that sends you looking at them.
+
 ## Design principles worth keeping
 
 **Detect from data, not from declarations.** Applies to inverter capabilities,
@@ -633,25 +663,62 @@ all" is configurable rather than a constant someone has to recompile.
 blocks, and every storage block on the inverters, are skipped entirely when
 nothing needs them. That is the concrete payoff of capability detection.
 
-## The modbus base class, and the migration waiting there
+## The modbus base class
 
-The three device classes derive from `modbus::ModbusDevice`, not
-`ModbusClientDevice`. Since ESPHome 2026.8 the `on_modbus_data()` /
-`on_modbus_error()` pair exists only on `ModbusDevice`, a deprecated shim that
-translates the new `on_response()` / `on_error()` into the old signatures.
-Deriving from `ModbusClientDevice` while marking those two `override` is a
-compile error, and the symptom names the wrong thing: it says the methods do not
-override, not that the base class changed underneath.
+The three device classes derive from `modbus::ModbusClientDevice`. They used to
+derive from the deprecated `ModbusDevice` shim; that migration is done, and the
+notes below are what it left behind.
 
-Both the shim and the `send()` helper are scheduled for removal in 2027.2.0.
-Migrating means overriding `on_response()` / `on_error()` (or the typed
-`on_read_input_registers()` and friends) and replacing every `send()` with
-`read_input_registers()`, `write_single_register()`, `write_multiple_registers()`
-or `queue_pdu()`. That is roughly twenty call sites across the two device classes,
-the address tool and the register dump. Worth doing in one pass rather than two -
-the typed callbacks deliver `std::span<const uint16_t>` in host order, so every
-parse function that currently indexes a byte vector changes shape at the same
-time.
+Responses arrive through three overrides. `on_read_registers(EntityType,
+start_address, span<const uint16_t>, ResponseStatus)` handles reads - the shared
+base of the holding and input variants, deliberately, because the identification
+sequences interleave both tables and splitting it would put two doors on one
+state machine. `on_write_single_register()` and `on_write_multiple_registers()`
+handle write acknowledgements. Success and exception both arrive at the same
+callback, with the outcome in `status`.
+
+That split is load bearing. A rejected write can no longer fall through into the
+identification state machine, because write responses have nowhere else to go.
+The old code prevented that by checking `writing_` before anything else in the
+error handler - correct, but only as long as nobody reordered it.
+
+**`on_custom_response()` must stay overridden.** The dispatcher validates that a
+response's length matches what was asked for; anything that does not conform is
+diverted there rather than delivered short. The default implementation only
+logs, so without the override the device would sit in `waiting_` until its own
+timeout. Both device classes treat it as an unusable reply and advance, which is
+what the old size guards did.
+
+**The read/write helpers return `bool`.** `false` means the request was refused
+at the door and no callback will ever follow, so `waiting_` must not be set.
+Every send path routes its outcome through `queued_()`, which mirrors the
+timeout recovery in `loop()` case for case, including the ordering - a write is
+abandoned only after the retry budget, exactly as a timed out one is. This is
+close to unreachable, since `try_send_()` already gates on
+`ready_for_immediate_send()`, but a silent stall is the failure hardest to read
+from a log.
+
+Registers arrive in host byte order. Every call site was already register
+indexed, so only the helpers changed shape: `reg16(d, r)` is `d[r]`, `fp32` joins
+two words high first, `ascii_from` takes two characters per word, and the size
+guards count registers rather than bytes.
+
+Not migrated, deliberately: `on_no_response()`, `on_sent()` and `on_not_sent()`
+are available and would let the hub's queue own arbitration, retiring the
+component's own watchdog, the `ready_for_immediate_send()` gating and
+`BUS_YIELD_MS`. The API moved without the timing so the commit stayed
+verifiable. The gain is real - the log shows the hub giving up at ~870 ms while
+the component waits out its own 1.5 s, so roughly 640 ms of dead bus per failed
+block.
+
+On the Python side all three classes are declared against
+`modbus.ModbusClientDevice` and registered with
+`register_modbus_client_device()`. Every bus reference uses
+`cv.use_id(modbus.ModbusClient)`, not `modbus.Modbus`: the latter is the base
+shared by the client and server hubs, so it would accept a `role: server` hub and
+fail in C++ instead of in validation. `final_validate_modbus_device()` is not
+used because it only inspects a single `modbus_id` key and cannot see the
+split bus keys.
 
 ## Bus timing
 
@@ -696,6 +763,20 @@ commands should be at least 850 ms apart.
 If the register is outside every block currently read, extend a block rather
 than adding a transaction. Check the bus budget first.
 
+### Adding a hub sensor derived from the slots
+
+1. Add the member and setter in `growatt_master.h`.
+2. Make the per slot contribution an accessor on `GrowattInverter`, not an
+   expression inside the loop, so the rule lives with the thing it describes and
+   two callers cannot drift apart.
+3. Sum it in `update_fleet_totals_()` and publish.
+4. Add a `cv.Optional` entry to the hub schema and a row to the key/setter table
+   in `to_code()`.
+
+Decide explicitly what an offline slot contributes. `contributes()` is the
+existing answer for "still counted as present"; bypass it only when the figure is
+a static property of the hardware rather than a measurement.
+
 ### Adding an editable setting
 
 1. Add an entry to `SettingField` in the header.
@@ -737,9 +818,10 @@ and evaluate it in `update_conditions_()`.
 
 ### Adding an identification step
 
-Add to `IdentStep`, send in `send_step_()`, parse in `on_modbus_data()`, and
-chain it in `advance_()`. Remember that a step which fails marks the whole run
-incomplete and triggers a retry.
+Add to `IdentStep`, send in `send_step_()` (routing the helper's return through
+`queued_()`), parse in the `step_` switch of `on_read_registers()`, and chain it
+in `advance_()`. Remember that a step which fails marks the whole run incomplete
+and triggers a retry.
 
 ## Testing method that worked
 
@@ -778,10 +860,19 @@ files change together, replace all of them.
 - Whether Growatt firmware genuinely requires periodic setpoint refreshes. The
   component rewrites every 60 s as a precaution; registers 42, 304 and 307
   relate to communication loss handling and would settle the question.
-- Whether the rebalancing gains are worth their complexity now that it runs
-  first and is bounded by measured capability. The one thing not yet observed is
-  a full day of it: whether it settles, or whether it and the increase pass
-  trade the same watts back and forth around the threshold.
+- Whether the rebalancing gains are worth their complexity on a system whose
+  single phase inverter is small relative to the three phase ones.
+- Three of the four new modbus paths are untested in the field. The first run
+  after the migration exercised only the normal read and write paths: no
+  exception, no rejected write, no `on_custom_response()`, no refused request.
+  The corrupt frames that did occur were dropped by the hub's parser before the
+  dispatcher saw them.
+- Frame corruption clusters on the longest reads. `0E:04:00:39:00:44` (68
+  registers, a 141 byte frame) failed twice in a row while shorter reads to the
+  same unit went through, and the same block succeeded on a later attempt. A
+  length dependent, intermittent signature points at reflections or marginal
+  termination rather than a faulty device - worth measuring before changing
+  anything in software.
 
 ## Started but not built
 
@@ -813,78 +904,16 @@ never in the inverter, it was the voltage it measured. Whether to reduce there
 too, and whether that should be the offending unit alone or everything on its
 phases, is unsettled.
 
-**A rolling capability estimate, now built, has two loose ends.** It infers what
-an inverter could produce at 100 % from what it produces while our limit is what
-it is actually hitting, and the ratio test that gates it was validated against
-real data - an SPH clipping at 9-18 % extrapolated to within 90 W of the same
-figure four times, while a PV limited MOD gave answers spread three to one. What
-has not been checked is how it behaves across a day: whether an hour long window
-is right, whether a unit that is curtailed only briefly at dawn produces a
-useful estimate, and whether the estimate should decay rather than expire.
-
-The second loose end is the diagnostic hiding in the same arithmetic. A unit at
-100 % producing half its nameplate is not being limited by anything we did -
-that is shading, soiling, snow or a fault. The ratio is already computed; it is
-not yet exposed as anything a person would notice.
+**Handing bus arbitration to the hub.** Deferred from the `ModbusClientDevice`
+migration so that commit changed the API without changing the timing. The pieces
+are `on_no_response()`, `on_sent()` and `on_not_sent()`; adopting them retires
+the component's own watchdog, the `ready_for_immediate_send()` gating and
+`BUS_YIELD_MS`, all of which duplicate what the hub's queue does natively. See
+the modbus base class section for the measured cost of not doing it.
 
 **Meter model select as an entity.** The address moved out of YAML into an
 entity on both device types; the meter's model override did not, and there is
 no particular reason for the inconsistency beyond nobody having asked.
-
-## Where this is going
-
-Three directions, in the order they have to happen.
-
-### 1. Migrate off the deprecated modbus API - by February 2027
-
-Not optional and not far off. ESPHome 2027.2.0 removes both the `ModbusDevice`
-shim the three device classes currently derive from and the `send()` helper
-every transmission uses. The details are in "The modbus base class" above.
-
-Do it as one pass, and do it before anything else. It touches roughly twenty
-call sites plus every parse function, and it is much easier to tell a migration
-bug from a logic bug when only one of them is in flight.
-
-### 2. Modbus over the network
-
-ESPHome has no Modbus TCP support: the `modbus` component is RTU only, and a
-2023 feature request for TCP is still open. The 2026.8 overhaul that brought
-`modbus_client` stayed on RTU. Three external components exist and none of them
-is a drop in:
-
-- `modbus_bridge` (rosenrot00, davidrapan) is a transparent TCP-to-RTU bridge -
-  it exposes an RTU bus *to* the network, which is the opposite of what is
-  wanted here.
-- `esphome_modbus_tcp_master` (Gucioo) and `esphome_modbus_tcp` (creepystefan)
-  are real TCP clients, but each is a self-contained component with its own
-  sensor platforms, not a transport another component can sit on.
-
-That is the actual obstacle: this component derives from a modbus device base
-and depends on the hub for sending and for dispatching replies. Network
-transport means either a TCP hub presenting the same interface, or abstracting
-the transport here.
-
-Which is the second reason to migrate first. The typed callbacks and helpers
-are exactly the seam where transport is chosen, and once parsing works from
-`std::span<const uint16_t>` rather than raw byte vectors, where the words came
-from stops mattering.
-
-Also worth remembering when this is picked up: RS485 gives predictable latency,
-and that is not incidental to a controller whose job is to notice export within
-a few seconds. Anything that puts a broker, a WiFi hop or a retry policy in the
-control path trades a property that currently works for one that has to be
-measured.
-
-### 3. A name
-
-`solar-master` is unclaimed. The reservation is that "master" describes how the
-component talks - Modbus master - and direction 2 may well end that. A name
-built on an abandoned transport is a poor inheritance. Something naming the
-function instead would survive it: the distinctive thing here is coordinating
-several inverters from a single meter to avoid export, and increasingly, to
-place surplus somewhere useful.
-
-Worth choosing after direction 2 is settled, not before.
 
 ## Working with Claude on this
 

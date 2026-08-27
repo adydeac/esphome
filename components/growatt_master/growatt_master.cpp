@@ -391,7 +391,30 @@ void GrowattHub::update_meter_health_() {
   }
 }
 
+void GrowattHub::update_fleet_totals_() {
+  float rated = 0, capacity = 0, capability = 0, power = 0;
+  for (GrowattInverter *inv : this->inverters_) {
+    rated += inv->rated_capacity();
+    capacity += inv->installed_capacity();
+    capability += inv->effective_capability();
+    power += inv->contributed_power();
+  }
+  if (this->installed_capacity_sens_ != nullptr)
+    this->installed_capacity_sens_->publish_state(rated);
+  if (this->total_capacity_sens_ != nullptr)
+    this->total_capacity_sens_->publish_state(capacity);
+  if (this->total_capability_sens_ != nullptr)
+    this->total_capability_sens_->publish_state(capability);
+  if (this->total_power_sens_ != nullptr)
+    this->total_power_sens_->publish_state(power);
+}
+
 void GrowattHub::update_aggregates_() {
+  // The fleet totals come from the inverters alone, so they are published even
+  // when the meter is missing or offline - losing the meter stops the control
+  // loop, but production carries on and is still worth reporting.
+  this->update_fleet_totals_();
+
   if (this->meters_.empty() || this->health_ == METER_OFFLINE) {
     this->import_w_ = NAN;
     this->export_w_ = NAN;
