@@ -54,6 +54,12 @@ class ModbusTcpClientHub : public modbus::ModbusClientHub {
   // half-parsed in the buffer.
   bool tx_blocked() override;
 
+  // Asks whether a partial response has gone stale. Upstream answers by comparing
+  // the buffer against the UART's rx_full_threshold, which is a null dereference
+  // with no UART behind it - and the client hub calls this the moment anything
+  // lands in rx_buffer_, so it fires on the very first response.
+  bool timeout_() override;
+
   enum class State : uint8_t { IDLE, CONNECTING, CONNECTED };
 
   void start_connect_();

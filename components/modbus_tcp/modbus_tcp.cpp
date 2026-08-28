@@ -167,6 +167,14 @@ bool ModbusTcpClientHub::tx_blocked() {
          this->tx_delay_remaining() > modbus::MODBUS_TX_MAX_DELAY_MS;
 }
 
+bool ModbusTcpClientHub::timeout_() {
+  // Always "finished". Not a shortcut: deliver_frame_() only ever appends whole
+  // frames, so a partial response cannot exist in rx_buffer_ by construction.
+  // There is also nothing to measure - TCP has no inter-character silence, which
+  // is the only thing upstream's version is timing.
+  return true;
+}
+
 bool ModbusTcpClientHub::send_frame_(const modbus::ModbusFrame &frame) {
   // Both conditions: state_ and sock_ are set together everywhere, but a null
   // dereference here faults the whole node, so the redundant check is cheap.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Vendors ESPHome's core `modbus` component and applies the transport patch.
 #
-# The patch is two `virtual` keywords. Everything else is upstream, byte for byte,
+# The patch is three `virtual` keywords. Everything else is upstream, byte for byte,
 # so re-running this after an ESPHome update is the whole maintenance burden.
 # If either substitution stops matching, the script fails loudly rather than
 # producing a copy that silently no longer has the seam.
@@ -52,6 +52,12 @@ patch_line "$DEST/modbus.h" \
 patch_line "$DEST/modbus.h" \
   "  bool send_frame_(const ModbusFrame &frame);" \
   "  virtual bool send_frame_(const ModbusFrame &frame);"
+# timeout_() decides whether a partial response has gone stale, using the UART's
+# rx_full_threshold. There is no UART behind a TCP hub, so this one has to be
+# overridable too or it dereferences a null parent the moment a frame arrives.
+patch_line "$DEST/modbus.h" \
+  "  bool timeout_();" \
+  "  virtual bool timeout_();"
 
 echo
 echo "Vendored to $DEST"

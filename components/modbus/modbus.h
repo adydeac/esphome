@@ -69,7 +69,7 @@ class Modbus : public uart::UARTDevice, public Component {
 
  protected:
   virtual void receive_bytes_();
-  bool timeout_();
+  virtual bool timeout_();
   virtual int32_t tx_delay_remaining();
   virtual void parse_modbus_frames() = 0;
   bool parse_modbus_server_frame_();
