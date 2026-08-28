@@ -852,6 +852,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // after a failed run cannot loop forever.
   void begin_identification_();
   void update_health_();
+  void zero_instantaneous_();
   void send_probe_();
   // Publishes any register backed select or switch whose address falls inside
   // the block that was just read, so they pick up values from whichever read

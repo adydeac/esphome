@@ -397,7 +397,13 @@ const char *GrowattInverter::health_text() const {
 void GrowattInverter::update_health_() {
   uint32_t now = millis();
   uint8_t h;
-  if (this->last_update_ == 0) {
+  if (this->address_ == 0) {
+    // An unpointed slot. Address zero is the Modbus broadcast address, so a
+    // read issued here would be answered by nobody and heard by everybody;
+    // there is nothing to wait a timeout for. Declaring it offline at once
+    // keeps it off the bus and off the dispatch.
+    h = INV_OFFLINE;
+  } else if (this->last_update_ == 0) {
     // Nothing heard yet. Assume it is there long enough for identification to
     // get a chance, then give up if it never answers.
     h = (now > this->offline_ms_) ? INV_OFFLINE : INV_ONLINE;
@@ -421,6 +427,7 @@ void GrowattInverter::update_health_() {
   if (h == INV_OFFLINE) {
     ESP_LOGW(TAG, "slot %u went offline, backing off to a probe every %u s",
              this->slot_index_, (unsigned) (this->offline_probe_ms_ / 1000));
+    this->zero_instantaneous_();
     this->waiting_ = false;
     this->want_send_ = false;
     this->poll_ = POLL_IDLE;
@@ -435,6 +442,43 @@ void GrowattInverter::update_health_() {
   } else {
     ESP_LOGD(TAG, "slot %u is %s", this->slot_index_, this->health_text());
   }
+}
+
+// Every flow figure this slot publishes, driven to zero once the unit is
+// declared offline. A power reading left frozen at its last value is worse than
+// no reading at all: it keeps a dead unit contributing to graphs and to any
+// template that sums across the plant, and it does so silently.
+//
+// What is deliberately absent is as much of the design as what is here.
+// Voltages, frequency, temperatures and state of charge stay on their last
+// reading - zero there would assert something this node cannot know, and a
+// grid voltage of 0 V reads as a blackout rather than as a lost slot. The
+// energy counters stay too: they are cumulative, and a counter that dips to
+// zero and climbs back destroys the long term statistics in Home Assistant.
+// Those all go stale honestly and the health entity is what says so.
+void GrowattInverter::zero_instantaneous_() {
+  for (uint8_t i = 0; i < 3; i++) {
+    pub_val(this->phases_[i].current, 0.0f);
+    pub_val(this->phases_[i].power, 0.0f);
+    pub_val(this->ups_[i].current, 0.0f);
+    pub_val(this->ups_[i].power, 0.0f);
+  }
+  for (uint8_t i = 0; i < MAX_STRINGS; i++) {
+    pub_val(this->pvs_[i].current, 0.0f);
+    pub_val(this->pvs_[i].power, 0.0f);
+  }
+  pub_val(this->pv_active_power_, 0.0f);
+  pub_val(this->grid_active_power_, 0.0f);
+  pub_val(this->ac_charge_power_, 0.0f);
+  pub_val(this->bat_charge_power_, 0.0f);
+  pub_val(this->bat_discharge_power_, 0.0f);
+  pub_val(this->bms_current_, 0.0f);
+  pub_val(this->power_to_user_, 0.0f);
+  pub_val(this->power_to_grid_, 0.0f);
+  pub_val(this->local_load_power_, 0.0f);
+  pub_val(this->ups_total_power_, 0.0f);
+  pub_val(this->ups_load_, 0.0f);
+  pub_val(this->ups_load_avg_, 0.0f);
 }
 
 // A refused request produces no callback at all, so starting the wait would
