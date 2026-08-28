@@ -1,6 +1,7 @@
 #include "modbus_tcp.h"
 
 #include <cerrno>
+#include <cinttypes>
 #include <cstring>
 
 #include "esphome/core/helpers.h"
@@ -98,22 +99,31 @@ void ModbusTcpClientHub::check_connect_() {
     this->disconnect_("getsockopt failed");
     return;
   }
-  if (soerr == EINPROGRESS || soerr == EALREADY) {
+  if (soerr != 0 && soerr != EINPROGRESS && soerr != EALREADY) {
+    ESP_LOGW(TAG, "Connect to %s:%u failed: %s", this->host_.c_str(), this->port_, strerror(soerr));
+    this->disconnect_(nullptr);
+    return;
+  }
+
+  // SO_ERROR reports a *pending error*, so it reads back as 0 while the handshake
+  // is still in flight - it cannot distinguish "connected" from "not finished
+  // yet". getpeername() can: a TCP socket only has a peer once the handshake has
+  // completed, and returns ENOTCONN until then. Without this the first loop pass
+  // after connect() declares success and the first write dies with ENOTCONN.
+  struct sockaddr_storage peer {};
+  socklen_t peer_len = sizeof(peer);
+  if (this->sock_->getpeername(reinterpret_cast<struct sockaddr *>(&peer), &peer_len) != 0) {
     // Bounded by the same reconnect interval rather than a separate knob: a
     // connect that has not completed in that window is not going to.
     if (millis() - this->connect_started_ > this->reconnect_interval_)
       this->disconnect_("connect timed out");
     return;
   }
-  if (soerr != 0) {
-    ESP_LOGW(TAG, "Connect to %s:%u failed: %s", this->host_.c_str(), this->port_, strerror(soerr));
-    this->disconnect_(nullptr);
-    return;
-  }
 
   this->state_ = State::CONNECTED;
   this->staging_.clear();
-  ESP_LOGI(TAG, "Connected to %s:%u", this->host_.c_str(), this->port_);
+  ESP_LOGI(TAG, "Connected to %s:%u after %" PRIu32 "ms", this->host_.c_str(), this->port_,
+           millis() - this->connect_started_);
 }
 
 void ModbusTcpClientHub::disconnect_(const char *reason) {
@@ -173,7 +183,8 @@ bool ModbusTcpClientHub::send_frame_(const modbus::ModbusFrame &frame) {
       ESP_LOGV(TAG, "Send would block, deferring");
       return false;
     }
-    this->disconnect_("write failed");
+    ESP_LOGW(TAG, "Write failed: %s", strerror(errno));
+    this->disconnect_(nullptr);
     return false;
   }
   if (static_cast<size_t>(written) != total) {
@@ -244,7 +255,8 @@ bool ModbusTcpClientHub::drain_socket_() {
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK)
       return true;  // drained
-    this->disconnect_("read failed");
+    ESP_LOGW(TAG, "Read failed: %s", strerror(errno));
+    this->disconnect_(nullptr);
     return false;
   }
 }
@@ -282,7 +294,7 @@ void ModbusTcpClientHub::deliver_frame_(const uint8_t *mbap, uint16_t total_len)
   out[pdu_len + 1] = crc & 0xFF;
   out[pdu_len + 2] = crc >> 8;
 
-  ESP_LOGV(TAG, "Read TID 0x%04X unit %u, %ums after send: %s", tid, unit, millis() - this->last_send_,
+  ESP_LOGV(TAG, "Read TID 0x%04X unit %u, %" PRIu32 "ms after send: %s", tid, unit, millis() - this->last_send_,
            format_hex_pretty(pdu, pdu_len).c_str());
 }
 
@@ -291,7 +303,7 @@ void ModbusTcpClientHub::dump_config() {
                 "Modbus TCP:\n"
                 "  Host: %s:%u\n"
                 "  Send Wait Time: %ums\n"
-                "  Reconnect Interval: %ums",
+                "  Reconnect Interval: %" PRIu32 "ms",
                 this->host_.c_str(), this->port_, this->send_wait_time_, this->reconnect_interval_);
 }
 
