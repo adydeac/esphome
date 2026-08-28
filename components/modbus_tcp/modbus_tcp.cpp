@@ -93,30 +93,46 @@ void ModbusTcpClientHub::start_connect_() {
 }
 
 void ModbusTcpClientHub::check_connect_() {
+  if (this->sock_ == nullptr) {
+    this->disconnect_(nullptr);
+    return;
+  }
+
+  // A non-blocking connect signals completion by making the socket writable.
+  // This is the only test that actually works on lwIP: SO_ERROR stays 0 while
+  // the handshake is in flight, and getpeername() returns the remote address as
+  // soon as connect() is called, because lwIP stores it on the pcb before SYN is
+  // even answered. Both report success against a host that is switched off.
+  fd_set write_fds;
+  FD_ZERO(&write_fds);
+  const int fd = this->sock_->get_fd();
+  FD_SET(fd, &write_fds);
+  struct timeval tv {};  // poll, never block the main loop
+
+  int ready = ::select(fd + 1, nullptr, &write_fds, nullptr, &tv);
+  if (ready < 0) {
+    this->disconnect_("select failed");
+    return;
+  }
+  if (ready == 0 || !FD_ISSET(fd, &write_fds)) {
+    // Bounded by the same reconnect interval rather than a separate knob: a
+    // connect that has not completed in that window is not going to.
+    if (millis() - this->connect_started_ > this->reconnect_interval_)
+      this->disconnect_("connect timed out");
+    return;
+  }
+
+  // Writable means the connect resolved - but resolved either way. SO_ERROR now
+  // carries the verdict, and a refused connection also arrives as writable.
   int soerr = 0;
   socklen_t len = sizeof(soerr);
   if (this->sock_->getsockopt(SOL_SOCKET, SO_ERROR, &soerr, &len) != 0) {
     this->disconnect_("getsockopt failed");
     return;
   }
-  if (soerr != 0 && soerr != EINPROGRESS && soerr != EALREADY) {
+  if (soerr != 0) {
     ESP_LOGW(TAG, "Connect to %s:%u failed: %s", this->host_.c_str(), this->port_, strerror(soerr));
     this->disconnect_(nullptr);
-    return;
-  }
-
-  // SO_ERROR reports a *pending error*, so it reads back as 0 while the handshake
-  // is still in flight - it cannot distinguish "connected" from "not finished
-  // yet". getpeername() can: a TCP socket only has a peer once the handshake has
-  // completed, and returns ENOTCONN until then. Without this the first loop pass
-  // after connect() declares success and the first write dies with ENOTCONN.
-  struct sockaddr_storage peer {};
-  socklen_t peer_len = sizeof(peer);
-  if (this->sock_->getpeername(reinterpret_cast<struct sockaddr *>(&peer), &peer_len) != 0) {
-    // Bounded by the same reconnect interval rather than a separate knob: a
-    // connect that has not completed in that window is not going to.
-    if (millis() - this->connect_started_ > this->reconnect_interval_)
-      this->disconnect_("connect timed out");
     return;
   }
 
@@ -143,7 +159,7 @@ void ModbusTcpClientHub::disconnect_(const char *reason) {
 }
 
 bool ModbusTcpClientHub::tx_blocked() {
-  if (this->state_ != State::CONNECTED)
+  if (this->state_ != State::CONNECTED || this->sock_ == nullptr)
     return true;
   // Upstream's conditions minus the UART one: still a single frame in flight,
   // still nothing sent while a response sits half-parsed.
@@ -152,7 +168,9 @@ bool ModbusTcpClientHub::tx_blocked() {
 }
 
 bool ModbusTcpClientHub::send_frame_(const modbus::ModbusFrame &frame) {
-  if (this->state_ != State::CONNECTED)
+  // Both conditions: state_ and sock_ are set together everywhere, but a null
+  // dereference here faults the whole node, so the redundant check is cheap.
+  if (this->state_ != State::CONNECTED || this->sock_ == nullptr)
     return false;
 
   const std::span<const uint8_t> pdu = frame.pdu();
@@ -208,7 +226,7 @@ bool ModbusTcpClientHub::send_frame_(const modbus::ModbusFrame &frame) {
 
 void ModbusTcpClientHub::receive_bytes_() {
   this->last_receive_check_ = millis();
-  if (this->state_ != State::CONNECTED)
+  if (this->state_ != State::CONNECTED || this->sock_ == nullptr)
     return;
   if (!this->drain_socket_())
     return;
