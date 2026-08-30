@@ -394,6 +394,12 @@ const char *GrowattInverter::health_text() const {
   }
 }
 
+void GrowattInverter::publish_control_summary(const char *s) {
+  if (this->control_ts_ == nullptr || this->control_ts_->state == s)
+    return;
+  this->control_ts_->publish_state(s);
+}
+
 void GrowattInverter::update_health_() {
   uint32_t now = millis();
   uint8_t h;

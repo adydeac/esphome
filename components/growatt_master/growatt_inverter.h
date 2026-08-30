@@ -516,6 +516,12 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint8_t health() const { return this->health_; }
   bool is_online() const { return this->health_ == INV_ONLINE; }
   const char *health_text() const;
+
+  /// The hub's per cycle view of this slot, in the same words it logs. Built by
+  /// the hub because it is the hub that knows the headroom figure; published
+  /// here so the string lands on the inverter's own device in Home Assistant
+  /// rather than on the hub with a slot number to decode.
+  void publish_control_summary(const char *s);
   void set_health_timeouts(uint32_t stalled_ms, uint32_t offline_ms) {
     this->stalled_ms_ = stalled_ms;
     this->offline_ms_ = offline_ms;
@@ -798,6 +804,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
 
 #define GI_TSETTER(name, member) \
   void set_##name(text_sensor::TextSensor *ts) { this->member = ts; }
+  GI_TSETTER(control_summary_text_sensor, control_ts_)
   GI_TSETTER(info_text_sensor, info_ts_)
   GI_TSETTER(firmware_text_sensor, firmware_ts_)
   GI_TSETTER(fw_build_text_sensor, fw_build_ts_)
@@ -1127,6 +1134,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   sensor::Sensor *ups_max_power_{nullptr};
   sensor::Sensor *battery_modules_{nullptr};
 
+  text_sensor::TextSensor *control_ts_{nullptr};
   text_sensor::TextSensor *info_ts_{nullptr};
   text_sensor::TextSensor *firmware_ts_{nullptr};
   text_sensor::TextSensor *fw_build_ts_{nullptr};

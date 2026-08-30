@@ -529,6 +529,9 @@ TEXT_SENSORS = {
     "fault": "set_fault_text_sensor",
     "derating": "set_derating_text_sensor",
     "state": "set_state_text_sensor",
+    # The hub's own per cycle line about this slot, published on the slot's
+    # device so it needs no slot number to interpret.
+    "control_summary": "set_control_summary_text_sensor",
 }
 
 PVS = [f"pv{i}" for i in range(1, 9)]
@@ -911,6 +914,18 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional("controller_state"): text_sensor.text_sensor_schema(
                 icon="mdi:tune"
             ),
+            # The three debug lines the control cycle logs, as entities. They
+            # move on nearly every cycle, so exclude them from the recorder
+            # unless the history is actually wanted.
+            cv.Optional("phase_summary"): text_sensor.text_sensor_schema(
+                icon="mdi:transmission-tower"
+            ),
+            cv.Optional("grid_summary"): text_sensor.text_sensor_schema(
+                icon="mdi:transmission-tower-import"
+            ),
+            cv.Optional("last_decision"): text_sensor.text_sensor_schema(
+                icon="mdi:gesture-tap-button"
+            ),
             cv.Optional("meter_import"): sensor.sensor_schema(
                 unit_of_measurement=_W, accuracy_decimals=1,
                 device_class=_DW, state_class=_M,
@@ -1095,9 +1110,15 @@ async def to_code(config):
     cg.add(hub.set_rebalancing(config[CONF_REBALANCING]))
     cg.add(hub.set_rebalance_threshold(config[CONF_REBALANCE_THRESHOLD]))
 
-    if "controller_state" in config:
-        ts = await text_sensor.new_text_sensor(config["controller_state"])
-        cg.add(hub.set_controller_state(ts))
+    for key, setter in (
+        ("controller_state", hub.set_controller_state),
+        ("phase_summary", hub.set_phase_summary),
+        ("grid_summary", hub.set_grid_summary),
+        ("last_decision", hub.set_last_decision),
+    ):
+        if key in config:
+            ts = await text_sensor.new_text_sensor(config[key])
+            cg.add(setter(ts))
 
     if CONF_GRID_POWER_SENSOR_ID in config:
         bs = await cg.get_variable(config[CONF_GRID_POWER_SENSOR_ID])

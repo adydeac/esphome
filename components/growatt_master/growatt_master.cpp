@@ -5,6 +5,7 @@
 #include "esphome/core/hal.h"
 #include <cmath>
 #include <cstring>
+#include <cstdarg>
 
 namespace esphome {
 namespace growatt_master {
@@ -519,6 +520,40 @@ void GrowattHub::update_conditions_() {
 
 // ============================== power controller ==============================
 
+// Home Assistant records every state change and these summaries carry voltages
+// to a decimal, so they move on nearly every cycle regardless. Filtering the
+// identical republish here rather than at each call site keeps the call sites
+// readable and costs one string compare.
+void GrowattHub::publish_text_(text_sensor::TextSensor *ts, const char *s) {
+  if (ts == nullptr || ts->state == s)
+    return;
+  ts->publish_state(s);
+}
+
+// One decision, formatted once and used twice: the log keeps the wording it had
+// and the text sensor gets that same sentence instead of a category name.
+//
+// This is the last action taken, deliberately not the current state.
+// controller_state already answers "what is the controller doing now" and will
+// sit on "balanced" for hours; this answers "what did it last actually change",
+// which is the question being asked when something looks wrong. The two are
+// meant to be readable together, including when they disagree.
+// The warn flag keeps each site at the level it had. A protection cut is a
+// warning and a routine step is not, and that distinction is what makes the log
+// filterable; folding both into one level to save an argument would lose it.
+void GrowattHub::set_decision_(bool warn, const char *fmt, ...) {
+  char buf[224];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  if (warn)
+    ESP_LOGW(TAG, "%s", buf);
+  else
+    ESP_LOGI(TAG, "%s", buf);
+  this->publish_text_(this->decision_ts_, buf);
+}
+
 void GrowattHub::set_ctrl_state_(const char *s) {
   if (this->ctrl_state_ == s)
     return;
@@ -768,16 +803,27 @@ void GrowattHub::control_power_() {
 
   ESP_LOGD(TAG, "=== control cycle, meter %u ms old ===",
            (unsigned) this->meter_age_ms_);
-  ESP_LOGD(TAG, "  L1 %+.0f W %.1f V | L2 %+.0f W %.1f V | L3 %+.0f W %.1f V",
+  // Formatted rather than logged directly: the text sensors have to be fed
+  // whether or not debug logging is compiled in, so the string is built once
+  // and both consumers read it.
+  char phase_line[160];
+  snprintf(phase_line, sizeof(phase_line),
+           "L1 %+.0f W %.1f V | L2 %+.0f W %.1f V | L3 %+.0f W %.1f V",
            err[0], volt[0], err[1], volt[1], err[2], volt[2]);
-  ESP_LOGD(TAG,
-           "  import %.0f W (threshold %.0f), export %.0f W (threshold %.0f, "
+  ESP_LOGD(TAG, "  %s", phase_line);
+  this->publish_text_(this->phase_ts_, phase_line);
+
+  char grid_line[224];
+  snprintf(grid_line, sizeof(grid_line),
+           "import %.0f W (threshold %.0f), export %.0f W (threshold %.0f, "
            "cap %.0f%s), voltage limit %.1f V phase / %.1f V line%s%s",
            this->import_w_, this->import_threshold_, this->export_w_,
            this->export_threshold_, export_cap,
            hard_export ? ", EXCEEDED" : "", limit, line_limit,
            meter_over ? ", METER OVER" : "",
            any_inverter_over ? ", INVERTER OVER" : "");
+  ESP_LOGD(TAG, "  %s", grid_line);
+  this->publish_text_(this->grid_ts_, grid_line);
 
   for (size_t i = 0; i < this->inverters_.size(); i++) {
     GrowattInverter *inv = this->inverters_[i];
@@ -823,15 +869,18 @@ void GrowattHub::control_power_() {
       if (!std::isnan(l) && l > 0)
         snprintf(w, sizeof(volts) - (w - volts), " / %.1f Vll", l);
     }
-    ESP_LOGD(TAG,
-             "  slot %u: %s, rate %u%% [%u..%u], injecting %.0f W, %s, "
+    char summary[224];
+    snprintf(summary, sizeof(summary),
+             "%s, rate %u%% [%u..%u], injecting %.0f W, %s, "
              "derating %u (%s), can produce more %s, %+.0f W of room to grow",
-             (unsigned) i, wiring, inv->get_power_percent(),
+             wiring, inv->get_power_percent(),
              inv->get_min_power_rate(), inv->get_max_power_rate(),
              std::isnan(inv->get_grid_power()) ? 0.0f : inv->get_grid_power(),
              volts, inv->get_derating_mode(), inv->get_derating_text(),
              inv->can_produce_more() ? "yes" : "no",
              this->headroom_up_(inv, err));
+    ESP_LOGD(TAG, "  slot %u: %s", (unsigned) i, summary);
+    inv->publish_control_summary(summary);
   }
 
   // ---- above the contractual export cap: cut everything at once ----
@@ -851,9 +900,9 @@ void GrowattHub::control_power_() {
         continue;
       float from = inv->get_power_percent();
       inv->apply_power_rate(from - this->max_step_);
-      ESP_LOGW(TAG, "export %.0f W over the %.0f W cap -> slot %u %.0f%% to %u%%",
-               this->export_w_, export_cap, (unsigned) i, from,
-               inv->get_power_percent());
+      this->set_decision_(true, "export %.0f W over the %.0f W cap -> slot %u %.0f%% to %u%%",
+                          this->export_w_, export_cap, (unsigned) i, from,
+                          inv->get_power_percent());
       cut = true;
     }
     if (cut) {
@@ -890,9 +939,9 @@ void GrowattHub::control_power_() {
         continue;
       float from = inv->get_power_percent();
       inv->apply_power_rate(from - this->min_step_);
-      ESP_LOGW(TAG, "L%d at %.1f V, above the %.1f V limit -> slot %u %.0f%% to %u%%",
-               worst + 1, volt[worst], limit, (unsigned) i, from,
-               inv->get_power_percent());
+      this->set_decision_(true, "L%d at %.1f V, above the %.1f V limit -> slot %u %.0f%% to %u%%",
+                          worst + 1, volt[worst], limit, (unsigned) i, from,
+                          inv->get_power_percent());
       cut = true;
     }
     if (cut) {
@@ -927,11 +976,11 @@ void GrowattHub::control_power_() {
         continue;
       float from = inv->get_power_percent();
       inv->apply_power_rate(from - this->min_step_);
-      ESP_LOGW(TAG,
-               "slot %u at %.1f V on its own terminals, above the %.1f V %s "
-               "limit -> %.0f%% to %u%%",
-               (unsigned) i, own, own_limit, own_line ? "line" : "phase", from,
-               inv->get_power_percent());
+      this->set_decision_(
+          true, "slot %u at %.1f V on its own terminals, above the %.1f V %s "
+          "limit -> %.0f%% to %u%%",
+          (unsigned) i, own, own_limit, own_line ? "line" : "phase", from,
+          inv->get_power_percent());
       cut = true;
     }
     if (cut) {
@@ -999,9 +1048,10 @@ void GrowattHub::control_power_() {
     float step = this->step_for_(chosen, power, this->decrease_gain_);
     float from = chosen->get_power_percent();
     chosen->apply_power_rate(from - step);
-    ESP_LOGI(TAG, "L%u exporting %.0f W -> %s inverter down %.1f%%, %.0f%% to %u%%",
-             p + 1, exported[p], chosen_single ? "single phase" : "three phase",
-             step, from, chosen->get_power_percent());
+    this->set_decision_(
+        false, "L%u exporting %.0f W -> %s inverter down %.1f%%, %.0f%% to %u%%",
+        p + 1, exported[p], chosen_single ? "single phase" : "three phase",
+        step, from, chosen->get_power_percent());
     acted = true;
   }
   if (acted) {
@@ -1078,12 +1128,12 @@ void GrowattHub::control_power_() {
           float step = this->step_for_(inv, free_up, this->decrease_gain_);
           float from = inv->get_power_percent();
           inv->apply_power_rate(from - step);
-          ESP_LOGI(TAG,
-                   "L%u needs %.0f W more headroom to reach the %.0f W the "
-                   "three phase units can absorb; trading slot %u down %.1f%% "
-                   "(%.0f%% to %u%%)",
-                   p + 1, free_up, target, (unsigned) i, step, from,
-                   inv->get_power_percent());
+          this->set_decision_(
+              false, "L%u needs %.0f W more headroom to reach the %.0f W the "
+              "three phase units can absorb; trading slot %u down %.1f%% "
+              "(%.0f%% to %u%%)",
+              p + 1, free_up, target, (unsigned) i, step, from,
+              inv->get_power_percent());
           traded = true;
           break;
         }
@@ -1195,10 +1245,11 @@ void GrowattHub::control_power_() {
     }
     float from = best->get_power_percent();
     best->apply_power_rate(from + step);
-    ESP_LOGI(TAG, "%.0f W coverable by slot %u (%s) -> up %.1f%%, %.0f%% to %u%%",
-             best_power, (unsigned) best_i,
-             best->get_phases() >= 3 ? "three phase" : "single phase", step,
-             from, best->get_power_percent());
+    this->set_decision_(
+        false, "%.0f W coverable by slot %u (%s) -> up %.1f%%, %.0f%% to %u%%",
+        best_power, (unsigned) best_i,
+        best->get_phases() >= 3 ? "three phase" : "single phase", step,
+        from, best->get_power_percent());
     this->set_ctrl_state_("raising to cover import");
     return;
   }

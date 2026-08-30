@@ -255,6 +255,9 @@ class GrowattHub : public PollingComponent {
   // costs money, while overshooting downwards only means importing a little
   // longer.
   void set_controller_state(text_sensor::TextSensor *ts) { this->ctrl_ts_ = ts; }
+  void set_phase_summary(text_sensor::TextSensor *ts) { this->phase_ts_ = ts; }
+  void set_grid_summary(text_sensor::TextSensor *ts) { this->grid_ts_ = ts; }
+  void set_last_decision(text_sensor::TextSensor *ts) { this->decision_ts_ = ts; }
 
   // Widens each inverter's own trip window past the range the controller works
   // in, so we get a chance to reduce power before the hardware disconnects.
@@ -314,6 +317,9 @@ class GrowattHub : public PollingComponent {
   float excess_on_(GrowattInverter *inv, const float *err, uint8_t phase);
   float step_for_(GrowattInverter *inv, float power_w, float gain);
   void set_ctrl_state_(const char *s);
+  void publish_text_(text_sensor::TextSensor *ts, const char *s);
+  void set_decision_(bool warn, const char *fmt, ...)
+      __attribute__((format(printf, 3, 4)));
 
   ESPPreferenceObject pref_;
 
@@ -380,6 +386,9 @@ class GrowattHub : public PollingComponent {
   bool started_{false};
   const char *ctrl_state_{""};
   text_sensor::TextSensor *ctrl_ts_{nullptr};
+  text_sensor::TextSensor *phase_ts_{nullptr};
+  text_sensor::TextSensor *grid_ts_{nullptr};
+  text_sensor::TextSensor *decision_ts_{nullptr};
   float voltage_soft_margin_{8.0f};
   float protection_margin_{10.0f};
   uint16_t restart_delay_s_{30};
