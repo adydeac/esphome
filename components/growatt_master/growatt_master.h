@@ -143,6 +143,7 @@ enum HubSetting : uint8_t {
   HUB_VOLTAGE_SOFT_MARGIN, // V
   HUB_CAPABILITY_RATIO,    // fraction of the implied limit that counts as "binding"
   HUB_CAPABILITY_WINDOW,   // s, how long a capability estimate stays valid
+  HUB_SETTLE_TIME,         // s, how long a unit is given to answer a setpoint
   HUB_SETTING_COUNT,
 };
 
@@ -162,10 +163,12 @@ struct GrowattHubPrefs {
   uint8_t version;
   uint8_t offline_action;
   float values[HUB_SETTING_COUNT];
-  // Grew by the four bytes the startup rate used to occupy. Keeping sizeof
-  // constant is what lets load() still succeed; the version byte is what stops
-  // it misreading the shifted fields.
-  uint8_t reserved[12];
+  // Grew by the four bytes the startup rate used to occupy, then by the four
+  // HUB_SETTLE_TIME takes. Keeping sizeof constant is what lets load() still
+  // succeed; the version byte is what stops it misreading the shifted fields.
+  // A field added out of here reads back as zero on the first boot after the
+  // upgrade, so setup() restores the configured default in that case.
+  uint8_t reserved[8];
 } __attribute__((packed));
 
 // What to do once the meter is definitively gone. Stopping is the safe default
@@ -390,6 +393,11 @@ class GrowattHub : public PollingComponent {
   text_sensor::TextSensor *grid_ts_{nullptr};
   text_sensor::TextSensor *decision_ts_{nullptr};
   float voltage_soft_margin_{8.0f};
+  // How long a unit is given to answer a setpoint change before the controller
+  // draws any conclusion from its output. The units without storage on the
+  // development site take 15-30 s to ramp, and a six second control cycle will
+  // happily issue four more commands inside that window.
+  uint32_t settle_ms_{30000};
   float protection_margin_{10.0f};
   uint16_t restart_delay_s_{30};
   bool rebalance_{true};

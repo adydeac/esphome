@@ -212,7 +212,8 @@ CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
     HUB_VOLTAGE_SOFT_MARGIN,
     HUB_CAPABILITY_RATIO,
     HUB_CAPABILITY_WINDOW,
-) = range(28)
+    HUB_SETTLE_TIME,
+) = range(29)
 
 CONF_REBALANCING = "phase_rebalancing"
 CONF_REBALANCE_THRESHOLD = "rebalance_threshold"
@@ -288,6 +289,11 @@ HUB_SETTINGS = {
                                  None, "mdi:gauge"),
     "capability_window": (HUB_CAPABILITY_WINDOW, 3600, 60, 86400, 60,
                           UNIT_SECOND, "mdi:history"),
+    # How long an inverter is given to answer a setpoint change. Units without
+    # storage take 15-30 s to ramp; anything the controller decides inside that
+    # window is decided on stale output.
+    "control_settle_time": (HUB_SETTLE_TIME, 30, 5, 300, 1, UNIT_SECOND,
+                            "mdi:timer-sand"),
 }
 
 # key -> (setter, icon, device_class)

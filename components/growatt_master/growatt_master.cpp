@@ -30,11 +30,22 @@ void GrowattHub::setup() {
   this->pref_ = global_preferences->make_preference<GrowattHubPrefs>(hash);
 
 
+  // Settings added out of the reserved block read back as zero from a store
+  // written before they existed. Zero is not a usable settle time, so the
+  // configured default is kept rather than letting the feature silently
+  // disable itself on the first boot after an upgrade.
+  float settle_default = this->values_[HUB_SETTLE_TIME];
+
   GrowattHubPrefs p{};
   if (this->pref_.load(&p)) {
     if (p.version == PREFS_VERSION) {
       for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
         this->values_[i] = p.values[i];
+      if (this->values_[HUB_SETTLE_TIME] <= 0) {
+        this->values_[HUB_SETTLE_TIME] = settle_default;
+        ESP_LOGI(TAG, "settle time not in the stored settings, using %.0f s",
+                 settle_default);
+      }
       if (p.offline_action < OFF_ACTION_COUNT)
         this->offline_action_ = p.offline_action;
       ESP_LOGI(TAG, "restored settings from flash");
@@ -103,6 +114,7 @@ void GrowattHub::apply_setting_(uint8_t field) {
     case HUB_PROTECTION_MARGIN: this->protection_margin_ = v; break;
     case HUB_RESTART_DELAY:     this->restart_delay_s_ = (uint16_t) lroundf(v); break;
     case HUB_VOLTAGE_SOFT_MARGIN: this->voltage_soft_margin_ = v; break;
+    case HUB_SETTLE_TIME:       this->settle_ms_ = (uint32_t) (v * 1000.0f); break;
     case HUB_CAPABILITY_RATIO:
     case HUB_CAPABILITY_WINDOW:
       for (auto *inv : this->inverters_)
@@ -1163,9 +1175,26 @@ void GrowattHub::control_power_() {
   // evenly a three phase unit covers three times the weakest phase, which beats
   // any single phase unit, while a lopsided import makes the single phase unit
   // on the heavy phase the better choice.
+  //
+  // Grid side room is only half the question, and on its own it is the half
+  // that misleads. A MOD 40K at 37 % producing 2.4 kW has 3.2 kW of grid room
+  // by that measure, so the controller walked it 37 -> 41 -> 45 -> 49 -> 53 ->
+  // 57 -> 60 % over six cycles while its output fell from 2465 to 2249 W with
+  // the afternoon sun. The setpoint was never what held it back. So the score
+  // is bounded by available_headroom(), which is deliberately zero whenever
+  // our own limit is not what the unit is pressing against.
+  //
+  // A unit with no estimate is not proven PV limited, only unproven, so it
+  // stays eligible as a probe: one minimum step, no more often than the settle
+  // time, and only when nothing better is on offer. If the setpoint really is
+  // the constraint the probe makes the unit clip, the estimate appears, and it
+  // becomes a full candidate on its own.
   GrowattInverter *best = nullptr;
   size_t best_i = 0;
   float best_power = 0;
+  GrowattInverter *probe = nullptr;
+  size_t probe_i = 0;
+  float probe_power = 0;
 
   for (size_t i = 0; i < this->inverters_.size(); i++) {
     GrowattInverter *inv = this->inverters_[i];
@@ -1211,7 +1240,27 @@ void GrowattHub::control_power_() {
     float power = this->headroom_up_(inv, err);
     if (power <= this->import_threshold_)
       continue;
-    // Strictly greater keeps declaration order as the tie breaker.
+
+    float room = inv->available_headroom();
+    if (room <= 0) {
+      if (!inv->probe_due(now, this->settle_ms_)) {
+        ESP_LOGD(TAG, "  slot %u: no capability estimate, probe not due yet",
+                 (unsigned) i);
+        continue;
+      }
+      // Strictly greater keeps declaration order as the tie breaker.
+      if (probe == nullptr || power > probe_power) {
+        probe = inv;
+        probe_i = i;
+        probe_power = power;
+      }
+      continue;
+    }
+    if (power > room) {
+      ESP_LOGD(TAG, "  slot %u: %.0f W of grid room but only %.0f W the unit "
+               "can use", (unsigned) i, power, room);
+      power = room;
+    }
     if (best == nullptr || power > best_power) {
       best = inv;
       best_i = i;
@@ -1219,8 +1268,19 @@ void GrowattHub::control_power_() {
     }
   }
 
+  bool probing = false;
+  if (best == nullptr && probe != nullptr) {
+    best = probe;
+    best_i = probe_i;
+    best_power = probe_power;
+    probing = true;
+    probe->note_probe(now);
+  }
+
   if (best != nullptr) {
-    float step = this->step_for_(best, best_power, this->increase_gain_);
+    float step = probing ? this->min_step_
+                         : this->step_for_(best, best_power,
+                                           this->increase_gain_);
     // Close to the limit, creep. The proportional step is sized from a power
     // error, which says nothing about how much voltage headroom is left, and a
     // 20 % jump here simply lands back above the limit next cycle.
@@ -1258,11 +1318,13 @@ void GrowattHub::control_power_() {
     float from = best->get_power_percent();
     best->apply_power_rate(from + step);
     this->set_decision_(
-        false, "%.0f W coverable by slot %u (%s) -> up %.1f%%, %.0f%% to %u%%",
+        false, "%.0f W coverable by slot %u (%s)%s -> up %.1f%%, %.0f%% to %u%%",
         best_power, (unsigned) best_i,
-        best->get_phases() >= 3 ? "three phase" : "single phase", step,
+        best->get_phases() >= 3 ? "three phase" : "single phase",
+        probing ? ", probing for its limit" : "", step,
         from, best->get_power_percent());
-    this->set_ctrl_state_("raising to cover import");
+    this->set_ctrl_state_(probing ? "probing for headroom"
+                                  : "raising to cover import");
     return;
   }
 

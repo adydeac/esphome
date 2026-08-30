@@ -577,6 +577,20 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // What raising this unit could still deliver. Zero when our limit is not what
   // is holding it back, because then raising it achieves nothing.
   float available_headroom() const;
+
+  // ---- controller bookkeeping -------------------------------------------
+  // Held here rather than in a table beside the inverter list because the slot
+  // already knows which slot it is, and a parallel vector would be one more
+  // thing to keep in step with enable/disable.
+  //
+  // A unit with no capability estimate is not necessarily PV limited - it may
+  // simply never have been seen clipping. The only way to tell the two apart
+  // is to raise it and watch, so the controller is allowed to probe; this
+  // keeps that from happening every cycle.
+  bool probe_due(uint32_t now, uint32_t interval) const {
+    return this->ctrl_probe_ms_ == 0 || now - this->ctrl_probe_ms_ >= interval;
+  }
+  void note_probe(uint32_t now) { this->ctrl_probe_ms_ = now; }
   uint8_t get_max_power_rate() const { return this->max_power_rate_; }
 
   // Clamps, stores and writes the active power rate, refreshing the UI entity.
@@ -908,6 +922,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   float cap_ratio_{0.9f};
   uint32_t cap_window_ms_{3600000};
   bool rate_binding_{false};
+  uint32_t ctrl_probe_ms_{0};
   void update_capability_();
   sensor::Sensor *capability_sens_{nullptr};
 
