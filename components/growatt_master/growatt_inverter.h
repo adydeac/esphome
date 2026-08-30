@@ -587,6 +587,24 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // simply never have been seen clipping. The only way to tell the two apart
   // is to raise it and watch, so the controller is allowed to probe; this
   // keeps that from happening every cycle.
+  // True unless the last rate change went the other way and has not yet had
+  // time to show up in the output. Reversing inside that window is how the
+  // rebalance and increase passes ended up undoing each other every cycle:
+  // neither could see what the other had just done, because the inverter had
+  // not answered yet.
+  //
+  // Safety paths - export over the cap, grid or terminal over voltage - do not
+  // consult this. Waiting is not an option when the meter says watts are going
+  // out of the gate, and a reduction is always safe to make.
+  bool may_move(int8_t dir, uint32_t now, uint32_t lockout) const {
+    if (this->ctrl_dir_ == 0 || dir == this->ctrl_dir_)
+      return true;
+    return now - this->ctrl_move_ms_ >= lockout;
+  }
+  uint32_t since_last_move(uint32_t now) const {
+    return now - this->ctrl_move_ms_;
+  }
+
   bool probe_due(uint32_t now, uint32_t interval) const {
     return this->ctrl_probe_ms_ == 0 || now - this->ctrl_probe_ms_ >= interval;
   }
@@ -923,6 +941,8 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint32_t cap_window_ms_{3600000};
   bool rate_binding_{false};
   uint32_t ctrl_probe_ms_{0};
+  int8_t ctrl_dir_{0};
+  uint32_t ctrl_move_ms_{0};
   void update_capability_();
   sensor::Sensor *capability_sens_{nullptr};
 

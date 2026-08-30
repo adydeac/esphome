@@ -1421,6 +1421,13 @@ void GrowattInverter::apply_power_rate(float pct) {
   if (pct > this->max_power_rate_)
     pct = this->max_power_rate_;
   uint16_t v = (uint16_t) lroundf(pct);
+  // Recorded here rather than at each call site so that every path that moves
+  // the rate - controller, safety cut, operator - leaves the same trace, and
+  // the watchdog rewrite of an unchanged value leaves none.
+  if (v != this->power_percent_) {
+    this->ctrl_dir_ = v > this->power_percent_ ? 1 : -1;
+    this->ctrl_move_ms_ = millis();
+  }
   this->settings_[SET_ACTIVE_POWER_RATE] = v;
   this->power_percent_ = (uint8_t) v;
   this->queue_write_(CMD_WRITE_SINGLE, REG_ACTIVE_POWER_RATE, &v, 1);

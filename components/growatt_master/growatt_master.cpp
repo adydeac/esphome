@@ -1097,18 +1097,18 @@ void GrowattHub::control_power_() {
     // actually pinning both three phase units at zero headroom - had no
     // reducible unit on it at all. Hence: only the binding phase is traded.
     uint8_t bind = 3;
-    float low = NAN, next = NAN, busiest = NAN;
+    float low = NAN, second = NAN, busiest = NAN;
     for (uint8_t p = 0; p < 3; p++) {
       if (std::isnan(err[p]))
         continue;
       if (std::isnan(busiest) || err[p] > busiest)
         busiest = err[p];
       if (std::isnan(low) || err[p] < low) {
-        next = low;
+        second = low;
         low = err[p];
         bind = p;
-      } else if (std::isnan(next) || err[p] < next) {
-        next = err[p];
+      } else if (std::isnan(second) || err[p] < second) {
+        second = err[p];
       }
     }
     if (low < 0)
@@ -1129,8 +1129,8 @@ void GrowattHub::control_power_() {
     // this trade is the next cycle's problem, by which time the minimum has
     // moved and the arithmetic is done again on the new one.
     float target = low + takers / 3.0f;
-    if (!std::isnan(next) && target > next)
-      target = next;
+    if (!std::isnan(second) && target > second)
+      target = second;
     float free_up = target - low;
 
     if (bind < 3 && !std::isnan(busiest) && busiest > this->import_threshold_ &&
@@ -1147,6 +1147,11 @@ void GrowattHub::control_power_() {
         float out = inv->get_grid_power();
         if (std::isnan(out) || out < MIN_INJECTING_W)
           continue;
+        if (!inv->may_move(-1, now, this->settle_ms_)) {
+          ESP_LOGD(TAG, "  slot %u: raised %u ms ago, not trading it down yet",
+                   (unsigned) i, (unsigned) inv->since_last_move(now));
+          continue;
+        }
 
         float step = this->step_for_(inv, free_up, this->decrease_gain_);
         float from = inv->get_power_percent();
@@ -1240,6 +1245,13 @@ void GrowattHub::control_power_() {
     float power = this->headroom_up_(inv, err);
     if (power <= this->import_threshold_)
       continue;
+
+    if (!inv->may_move(1, now, this->settle_ms_)) {
+      ESP_LOGD(TAG, "  slot %u: cut %u ms ago, letting it settle before "
+               "raising it again", (unsigned) i,
+               (unsigned) inv->since_last_move(now));
+      continue;
+    }
 
     float room = inv->available_headroom();
     if (room <= 0) {
