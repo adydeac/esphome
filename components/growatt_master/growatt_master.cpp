@@ -1074,17 +1074,33 @@ void GrowattHub::control_power_() {
   // the slack the target collapses and nothing is traded. Without that bound,
   // putting rebalancing first would walk the single phase units down to zero.
   if (this->rebalance_) {
-    float busiest = NAN, worst = NAN;
+    // A three phase unit spreads evenly, so what it can add is decided by the
+    // phase with the least room - and by that phase alone. Trading a single
+    // phase unit down on any other phase raises a figure that was never the
+    // constraint: the minimum does not move, the three phase units gain
+    // nothing, and the traded production is simply lost. Measured on the
+    // development system at L1 +0 W, L2 +1966 W, L3 +2070 W, the old code read
+    // the busiest phase as the target and walked the L2 unit down one percent
+    // per cycle for eight consecutive cycles while L1 - the phase that was
+    // actually pinning both three phase units at zero headroom - had no
+    // reducible unit on it at all. Hence: only the binding phase is traded.
+    uint8_t bind = 3;
+    float low = NAN, next = NAN, busiest = NAN;
     for (uint8_t p = 0; p < 3; p++) {
       if (std::isnan(err[p]))
         continue;
       if (std::isnan(busiest) || err[p] > busiest)
         busiest = err[p];
-      if (std::isnan(worst) || err[p] < worst)
-        worst = err[p];
+      if (std::isnan(low) || err[p] < low) {
+        next = low;
+        low = err[p];
+        bind = p;
+      } else if (std::isnan(next) || err[p] < next) {
+        next = err[p];
+      }
     }
-    if (worst < 0)
-      worst = 0;
+    if (low < 0)
+      low = 0;
 
     // Only units whose output is actually held back by our setpoint count: one
     // producing 388 W of a 24000 W allowance will not produce more because we
@@ -1096,52 +1112,48 @@ void GrowattHub::control_power_() {
         takers += inv->available_headroom();
     }
 
-    // A three phase unit spreads evenly, so delivering X to the busiest phase
-    // costs X of headroom on each of the others. The target is the smaller of
-    // what the busiest phase needs and what the takers could actually supply.
-    float target = takers / 3.0f;
-    if (!std::isnan(busiest) && target > busiest)
-      target = busiest;
+    // Raising the binding phase past the second lowest buys nothing either:
+    // that phase becomes the constraint instead. Whatever is still needed after
+    // this trade is the next cycle's problem, by which time the minimum has
+    // moved and the arithmetic is done again on the new one.
+    float target = low + takers / 3.0f;
+    if (!std::isnan(next) && target > next)
+      target = next;
+    float free_up = target - low;
 
-    if (!std::isnan(busiest) && busiest > this->import_threshold_ &&
-        target - worst > this->rebalance_threshold_) {
+    if (bind < 3 && !std::isnan(busiest) && busiest > this->import_threshold_ &&
+        free_up > this->rebalance_threshold_) {
       bool traded = false;
-      for (uint8_t p = 0; p < 3; p++) {
-        if (std::isnan(err[p]))
+      for (int i = (int) this->inverters_.size() - 1; i >= 0; i--) {
+        GrowattInverter *inv = this->inverters_[i];
+        if (!inv->is_enabled() || !inv->is_online())
           continue;
-        float free_up = target - err[p];
-        if (free_up <= 0)
+        if (inv->get_phases() >= 3 || inv->get_phase() != bind)
+          continue;
+        if (inv->get_power_percent() <= inv->get_min_power_rate())
+          continue;
+        float out = inv->get_grid_power();
+        if (std::isnan(out) || out < MIN_INJECTING_W)
           continue;
 
-        for (int i = (int) this->inverters_.size() - 1; i >= 0; i--) {
-          GrowattInverter *inv = this->inverters_[i];
-          if (!inv->is_enabled() || !inv->is_online())
-            continue;
-          if (inv->get_phases() >= 3 || inv->get_phase() != p)
-            continue;
-          if (inv->get_power_percent() <= inv->get_min_power_rate())
-            continue;
-          float out = inv->get_grid_power();
-          if (std::isnan(out) || out < MIN_INJECTING_W)
-            continue;
-
-          float step = this->step_for_(inv, free_up, this->decrease_gain_);
-          float from = inv->get_power_percent();
-          inv->apply_power_rate(from - step);
-          this->set_decision_(
-              false, "L%u needs %.0f W more headroom to reach the %.0f W the "
-              "three phase units can absorb; trading slot %u down %.1f%% "
-              "(%.0f%% to %u%%)",
-              p + 1, free_up, target, (unsigned) i, step, from,
-              inv->get_power_percent());
-          traded = true;
-          break;
-        }
+        float step = this->step_for_(inv, free_up, this->decrease_gain_);
+        float from = inv->get_power_percent();
+        inv->apply_power_rate(from - step);
+        this->set_decision_(
+            false, "L%u is the binding phase at %.0f W; freeing %.0f W there "
+            "buys the three phase units %.0f W - trading slot %u down %.1f%% "
+            "(%.0f%% to %u%%)",
+            bind + 1, low, free_up, free_up * 3.0f, (unsigned) i, step, from,
+            inv->get_power_percent());
+        traded = true;
+        break;
       }
       if (traded) {
         this->set_ctrl_state_("rebalancing phases");
         return;
       }
+      ESP_LOGD(TAG, "  L%u is binding with %.0f W to free, but no single phase "
+               "unit there can give it up", bind + 1, free_up);
     }
   }
 
