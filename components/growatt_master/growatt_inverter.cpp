@@ -422,11 +422,12 @@ void GrowattInverter::update_health_() {
     else
       h = INV_OFFLINE;
   }
-  if (h == this->health_)
+  if (h == this->health_ && this->health_published_)
     return;
 
   uint8_t was = this->health_;
   this->health_ = h;
+  this->health_published_ = true;
   if (this->state_ts_ != nullptr)
     this->state_ts_->publish_state(this->health_text());
 

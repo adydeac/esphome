@@ -915,6 +915,13 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint32_t ident_retry_at_{0};
   uint8_t ident_runs_{0};
   uint8_t health_{INV_ONLINE};
+  // The state entity is written on transitions, and the initial value above is
+  // the one a healthy slot settles on, so a unit that comes up and stays up
+  // never produces a transition and its entity stays unknown for the life of
+  // the node. This makes the first evaluation count as one regardless of what
+  // it finds. Set even when no state sensor is configured, so the early return
+  // still short-circuits and the transition logging does not repeat.
+  bool health_published_{false};
   uint32_t stalled_ms_{10000};
   uint32_t offline_ms_{20000};
   uint32_t offline_probe_ms_{60000};
