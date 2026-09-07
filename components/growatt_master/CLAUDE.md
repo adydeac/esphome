@@ -523,6 +523,14 @@ inverter keeps what its installer left, which is a defensible setting where a
 guessed one is not - and `protection_applied_` is cleared on every run, so a
 later attempt that does succeed applies them with no extra bookkeeping.
 
+Meters take their response timeout from the hub too, the same way and for the
+same reason. On RS485 the mismatch ran the other way from the TCP case - the
+hub's `send_wait_time` was the shorter of the two - which wastes the difference
+on every failure rather than discarding good answers, but it is the same defect:
+two watchdogs on one request and no rule saying which wins. Taking the verdict
+from `on_no_response()` removes the disagreement by construction instead of by
+keeping two numbers in step.
+
 Meters follow the same health contract as the inverters, for the same reason. A
 meter that has gone quiet for `device_offline_timeout` drops back to
 identification rather than continuing to poll: the model and phase count decided

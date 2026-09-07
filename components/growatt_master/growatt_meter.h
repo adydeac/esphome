@@ -126,6 +126,12 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
   float get_setup_priority() const override { return setup_priority::DATA; }
 
   // Success and exception both land here, the outcome in status.
+  // The hub's verdicts that a request went unanswered or was dropped before it
+  // was sent. Both are terminal, so this meter's state machine has to be told
+  // or it waits forever. Overriding them is what removes the second timeout
+  // this component used to keep for itself.
+  bool on_no_response(std::span<const uint8_t> request_pdu) override;
+  void on_not_sent(std::span<const uint8_t> request_pdu) override;
   void on_read_registers(modbus::EntityType entity_type, uint16_t start_address,
                          std::span<const uint16_t> data,
                          modbus::ResponseStatus status) override;
@@ -204,6 +210,10 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
   bool queued_(bool ok);
   void send_step_();
   void advance_(bool ok);
+  /// Recovery for a request that resolved with nothing usable: a silence, a
+  /// frame dropped before it was sent, or the backstop. `why` is the wording
+  /// for the retry log line.
+  void no_answer_(const char *why);
   void check_offline_();
   void start_poll_();
   void send_poll_();

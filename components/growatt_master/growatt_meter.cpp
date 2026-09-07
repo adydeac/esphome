@@ -8,7 +8,10 @@ namespace growatt_master {
 
 static const char *const TAG = "growatt_meter";
 
-static const uint32_t METER_TIMEOUT_MS = 1500;
+// Not a response timeout - the hub's send_wait_time is that, and a second,
+// shorter one here is exactly what this replaces. Only a terminal callback that
+// never arrives gets this far.
+static const uint32_t METER_STALL_BACKSTOP_MS = 15000;
 static const uint8_t METER_MAX_RETRIES = 2;
 // Retries above are within one step; these bound whole identification runs.
 // Three is enough to ride out a busy bus, and the interval matches the probe
@@ -318,21 +321,57 @@ void GrowattMeter::try_send_() {
     this->send_step_();
 }
 
+// The hub decides a request went unanswered and says so here. Keeping a second,
+// independent timer on this side only creates a disagreement about when a
+// request is over - which of the two is shorter decides whose answer gets
+// thrown away, and neither ordering is right.
+bool GrowattMeter::on_no_response(std::span<const uint8_t> request_pdu) {
+  if (this->waiting_)
+    this->no_answer_("no response");
+  // Declining the hub's offer to re-queue: the retry budget, the poll block and
+  // the identification step all live here, and a retry has always been decided
+  // here too.
+  return false;
+}
+
+// Accepted into the machine and then dropped before it reached the wire. Same
+// hole as a silence, and just as terminal - nothing else is coming for that
+// request - so it takes the same recovery.
+void GrowattMeter::on_not_sent(std::span<const uint8_t> request_pdu) {
+  if (this->waiting_)
+    this->no_answer_("never sent");
+}
+
 void GrowattMeter::loop() {
   if (this->want_send_ && !this->waiting_)
     this->try_send_();
 
   if (!this->waiting_)
     return;
-  if (millis() - this->last_send_ < METER_TIMEOUT_MS)
-    return;
 
+  // Not a response timeout - the hub owns that. This catches a terminal
+  // callback that never arrives at all, which would otherwise strand this
+  // meter waiting forever now that there is no local timer. Well above any
+  // send_wait_time worth configuring, so reaching it means the hub broke its
+  // contract: logged as the fault it is rather than hidden among the retries.
+  if (millis() - this->last_send_ < METER_STALL_BACKSTOP_MS)
+    return;
+  ESP_LOGE(TAG, "meter %u: no terminal callback %u ms after send, recovering",
+           this->slot_index_, (unsigned) METER_STALL_BACKSTOP_MS);
+  this->no_answer_("lost callback");
+}
+
+// Everything that follows a request resolving with nothing usable in it, split
+// out of loop() when the hub's callback became the trigger. A silence, a
+// dropped frame and the backstop all have to leave the machine in the same
+// place, which is what the retry budget assumes.
+void GrowattMeter::no_answer_(const char *why) {
   this->waiting_ = false;
   this->retries_++;
   this->bus_release_ = millis();
 
   if (this->retries_ <= METER_MAX_RETRIES) {
-    ESP_LOGD(TAG, "meter %u: timeout, retrying (%u/%u)", this->slot_index_,
+    ESP_LOGD(TAG, "meter %u: %s, retrying (%u/%u)", this->slot_index_, why,
              this->retries_, METER_MAX_RETRIES);
     this->want_send_ = true;
     return;
