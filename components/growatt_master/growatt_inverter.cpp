@@ -42,6 +42,22 @@ static inline uint32_t reg32(std::span<const uint16_t> d, size_t reg) {
   return (((uint32_t) reg16(d, reg)) << 16) | reg16(d, reg + 1);
 }
 
+// Almost every 32-bit quantity in this protocol is a magnitude: each direction
+// gets its own register pair - power to user and power to grid, charge and
+// discharge - so none of them ever has to go below zero. Total AC power is the
+// exception. It is real power at the grid connection, and it goes negative
+// whenever the unit draws from the grid instead of feeding it, which is what a
+// PV inverter does all night.
+static inline int32_t sreg32(std::span<const uint16_t> d, size_t reg) {
+  return (int32_t) reg32(d, reg);
+}
+
+static inline void pub2s(sensor::Sensor *s, std::span<const uint16_t> d,
+                         size_t reg, float unit) {
+  if (s != nullptr)
+    s->publish_state(sreg32(d, reg) * unit);
+}
+
 static inline void pub1(sensor::Sensor *s, std::span<const uint16_t> d,
                         size_t reg, float unit) {
   if (s != nullptr)
@@ -1066,8 +1082,8 @@ void GrowattInverter::parse_fast_main_(std::span<const uint16_t> data) {
     pub2(this->pvs_[i].power, data, v + 2, ONE_DEC);
   }
 
-  pub2(this->grid_active_power_, data, IN_AC_POWER, ONE_DEC);
-  this->grid_power_w_ = reg32(data, IN_AC_POWER) * ONE_DEC;
+  pub2s(this->grid_active_power_, data, IN_AC_POWER, ONE_DEC);
+  this->grid_power_w_ = sreg32(data, IN_AC_POWER) * ONE_DEC;
   this->revise_nameplate_();
   this->update_capability_();
   pub1(this->frequency_, data, IN_FREQUENCY, TWO_DEC);
@@ -1078,6 +1094,10 @@ void GrowattInverter::parse_fast_main_(std::span<const uint16_t> data) {
     size_t v = IN_VAC[i];
     this->ac_voltage_[i] = reg16(data, v) * ONE_DEC;
     iac[i] = reg16(data, v + 1) * ONE_DEC;
+    // Deliberately unsigned, unlike the total above: the per phase registers
+    // carry Vac x Iac, a magnitude, and stay positive while the total is
+    // negative. Measured at night on a MIN: total -31.0 W, Pac1 +48.5 W with
+    // Vac1 228.7 V and Iac1 0.2 A.
     pac[i] = reg32(data, v + 2) * ONE_DEC;
     if (iac[i] >= PHASE_CURRENT_PRESENT_A)
       i_present++;

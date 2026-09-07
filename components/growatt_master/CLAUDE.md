@@ -406,6 +406,16 @@ because they share a bus - they may not - but because the question being asked
 is the same one, and a second set of timeouts would be two things to tune where
 one will do.
 
+Total AC power is the one 32-bit quantity read as signed. Everything else in
+this protocol is a magnitude - power to user and power to grid are separate
+register pairs, so are charge and discharge, and the per phase Pac registers
+carry Vac x Iac and stay positive even while the total is negative. Reading the
+total as unsigned turned a night time draw of -31.0 W into 429496704 W, which
+`revise_nameplate_()` then read as output far above the stated rating and
+"corrected" a 6000 VA MIN to 60000 VA. That latch only clears on the next
+identification, so a sign error in one register silently rewrote the model's
+capacity and everything computed from it.
+
 Storage lives in one of two register families and never both. An SPH keeps it at
 holding/input 1000, a TL-X/TL-XH at input 3125 and up, with presence flagged by
 `BDC_OnOffState` at 3118 rather than by holding 183..185 - those read zero on a
