@@ -76,6 +76,83 @@ The one observed exception: input registers at 3000 on an SPH do raise
 exception 2, while holding registers at 3000 return zeros. Behaviour is not
 even consistent within one unit.
 
+### The two storage families share entities, not registers
+
+`storage_family` is the single biggest branch in the component. SPH keeps its
+storage data in the 1000 input block; TL-XH keeps its in the 3125 block, and the
+two are mutually exclusive - a unit that answers one has nothing at the other.
+The entity set is deliberately the same on both where the data exists, so the
+YAML side does not have to know which family a slot is, but the coverage is not
+the same and pretending otherwise produces sensors that are quietly always zero.
+`README.md` carries the field matrix: blocks, settings and entities against the
+three families, with the models that land in each. Keep it current when a
+register moves - it is the only place the difference is written down as a whole
+rather than scattered over branch conditions. It is organised by family and not
+by model on purpose: nothing in the component keys off a model name, so a MID
+TL3-X and a MOD TL3-X are the same device to every address in it, and a MID
+TL3-XH is a MIN TL-XH, with one exception noted there and repeated below.
+
+Two consequences are worth stating here because they are not obvious from the
+matrix:
+
+**The 1070 settings block is read on any storage slot, including a TL-XH.**
+`IDENT_SETTINGS` is gated on `has_storage`, not on the family, and a TL-XH
+answers holding 1070..1108 with zeros rather than an exception - the general
+rule above, in its most expensive form. Grid-first and battery-first rates, stop
+SOCs, AC charge and both time windows therefore exist as entities on a MIN
+TL-XH, read back as zero, and accept writes that go nowhere. The family has the
+same functions in its own holding block - 3036 and 3037 for the grid-first rate
+and stop SOC, 3047 to 3049 for the battery-first rate, stop SOC and AC charge,
+with two register time windows at 3038 and 3040 - and `README.md` carries the
+map. Nothing reads or writes them yet.
+
+The fix is not to hide the entities on a TL-XH but to re-point them, which needs
+`SETTING_ADDR` to become per family rather than one flat table, with a zero
+entry meaning "this family does not have it" so an entity that cannot work is
+absent rather than decorative. That is the same change that would let the
+priority at input 3144 - already inside the slow block at offset 19, already
+read and discarded every cycle - be published as the read back of what actually
+took effect.
+
+The window model differs, and that is the part that does not map onto the
+existing entities. An SPH decides a period's priority by which block it is in -
+three grid-first periods at 1080, three battery-first at 1100 - while a TL-XH
+keeps nine windows in one list and puts the priority inside each entry, in bits
+13 and 14 of the start word, with the enable in bit 15 and the hour squeezed
+into bits 8 to 12. So `WindowMode` as a block selector is an SPH concept; on the
+other family it is a property of the window.
+
+The agreed shape is three periods per mode on both families, `WindowMode` gaining
+a load-first member, and the family deciding only how a (mode, period) pair
+becomes an address: on an SPH the mode picks the block - 1080 grid first, 1100
+battery first, 1110 load first, three registers per period in each - on a TL-XH
+it picks which third of the nine windows and is written into the priority bits.
+The load-first block is the reason `HO_SETTINGS_CNT` has to grow from 39 to 49:
+1070..1118 is still a single read, and stopping at 1108 was only ever an
+artefact of not knowing the block was there. That
+convention is ours, not the firmware's - any window there may carry any
+priority - so it has one obligation attached: never enforce it on read.
+ShinePhone can and does write a different arrangement, and rewriting it at
+identification is the same mistake as a switch restoring its state into a live
+register. Publish what is there, warn once when an enabled window disagrees with
+its slot, correct it when that window is next written.
+
+Two write rules are not optional. The hour needs masking with 0x1F or the flags
+read as part of it - an enabled 07:35 grid-first window returns 135 hours to the
+SPH parser. And the flags have to be carried forward on every write, or changing
+a start time turns the window off. The SPH lesson still applies to the block as
+a whole: a change the firmware does not accept is swallowed, not refused.
+
+**`battery_capacity` is a raw register with a unit bolted on.** It is input
+1090, published as kWh, on SPH only. 1090 sits immediately after the BMS group
+(SOC, voltage, current, temperature at 1086..1089), where Growatt's map
+continues with current and gauge figures rather than energy, and on the
+development fleet it reads 25.0 against 7 ARK 2.5H modules - 17.5 kWh installed.
+A number that plausible as amperes and that implausible as kilowatt hours is not
+a scale error, it is the wrong register. Installed energy is derivable and
+already computed internally for `ups_max_power`: `battery_modules *
+module_capacity`, where the module count comes from pack voltage.
+
 ### The Storage family deviates from the documented map
 
 Everything below is correct on MOD and MIN units and wrong on SPH:
@@ -443,6 +520,14 @@ dead on this hardware, and skipping them saves a round trip per cycle on the one
 resource that is actually scarce. `caps_.has_ups_block()` is the test, not
 `has_ups`: on an SPH the block exists whether or not the output is enabled, and
 a disabled UPS still reports through it.
+
+That test is a family test, though, and the family is wider than the hardware it
+was written against. `has_ups_block()` returns true only for `STORAGE_SPH`, so
+the EPS block is skipped on every TL-XH - correct for a MIN 6000TL-XH, wrong for
+a MID TL3-XH, which does have an EPS terminal and would simply never publish it.
+The fix is to test for the terminal instead of inferring it from the family, and
+no register read has been shown to answer that question yet, which is why this
+is recorded rather than coded.
 
 The two families publish the same entity set. What differs is scale and order,
 not meaning: pack voltage is 0.1 V at 1013 and 0.01 V at 3169, SOC sits beside
@@ -928,6 +1013,25 @@ files change together, replace all of them.
 
 ## Still unverified
 
+- What input 1090 on an SPH actually is. It is published as `battery_capacity`
+  in kWh and reads 25.0 for a 17.5 kWh pack. A dump of 1086..1096 compared
+  against what the BMS reports would settle it; until then the sensor is not
+  evidence of anything.
+- Where the TL-XH family keeps grid-first and battery-first control. The SPH
+  addresses are read on those units and answer with zeros, so the entities are
+  currently decorative.
+- Which register says whether a TL-XH has an EPS terminal. Without one,
+  `has_ups_block()` has to keep guessing from the family, which is right for a
+  MIN and wrong for a MID TL3-XH.
+- What input 3144 on a TL-XH actually reports. It is documented as the priority
+  - load first, battery first, grid first - but not whether that is the mode in
+  force at this instant or a configured default, and the two are worth very
+  different amounts. If it tracks, it is a free acceptance test for every write
+  into the settings block, which that block badly needs since the firmware
+  swallows changes it will not make. The test is mechanical and worth writing as
+  one: set a window that starts a minute from now, sample 3144 across the
+  boundary, then flip the window's priority bits and sample again. Nothing reads
+  the register until that has been done.
 - Whether derating mode 1 blocks legitimately or just means low sun.
 - Whether the Storage family expects phase or line voltage in registers 52-53;
   it is currently forced to phase in the development configuration.
