@@ -87,6 +87,8 @@ void GrowattHub::setup() {
     inv->set_startup_grace(this->startup_grace_ms_);
     inv->set_settle_time(this->settle_ms_);
   }
+  for (auto *m : this->meters_)
+    m->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
 
   // Both timers start now rather than at zero, which would make them due on the
   // first tick. The first tick is the worst moment either could fire: nothing
@@ -160,6 +162,8 @@ void GrowattHub::apply_setting_(uint8_t field) {
   if (field == HUB_STALLED_TIMEOUT || field == HUB_OFFLINE_TIMEOUT ||
       field == HUB_OFFLINE_PROBE || field == HUB_STARTUP_GRACE ||
       field == HUB_SETTLE_TIME) {
+    for (auto *m : this->meters_)
+      m->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
     for (auto *inv : this->inverters_) {
       inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
       inv->set_offline_probe_interval(this->offline_probe_ms_);

@@ -13,7 +13,7 @@ static const uint8_t METER_MAX_RETRIES = 2;
 // Retries above are within one step; these bound whole identification runs.
 // Three is enough to ride out a busy bus, and the interval matches the probe
 // the inverters use for a slot that has gone quiet.
-static const uint8_t METER_IDENT_MAX_RUNS = 3;
+static const uint8_t METER_IDENT_LOUD_RUNS = 3;
 static const uint32_t METER_IDENT_RETRY_MS = 60000;
 
 // Matches BUS_YIELD_MS in growatt_inverter.cpp: step aside after our own
@@ -197,6 +197,7 @@ void GrowattMeter::restart_identification() {
   // the backoff both clear.
   this->ident_runs_ = 0;
   this->ident_retry_at_ = 0;
+  this->offline_ = false;
   this->step_ = MSTEP_START;
   this->poll_ = MPOLL_IDLE;
   this->retries_ = 0;
@@ -240,9 +241,36 @@ bool GrowattMeter::needs_energy_block_() const {
 
 // ------------------------------ scheduling ------------------------------
 
+// A meter that has gone quiet has to prove itself again before its data is used
+// for anything. The inverters already work this way - offline, then re-identify
+// on return - and the reason is the same on this side: the model and phase
+// count decided at identification are what size the poll blocks and what the
+// hub's aggregates assume, so resuming a poll against a meter that may have
+// been swapped, re-addressed or reconfigured while it was away means deciding
+// on stale premises. Identification doubles as the offline probe, which is why
+// there is no separate probe state: the retry backoff a failed run already
+// schedules is exactly the probe cadence.
+void GrowattMeter::check_offline_() {
+  if (this->step_ != MSTEP_DONE || this->last_update_ == 0)
+    return;
+  uint32_t age_ms = (micros() - this->last_update_) / 1000;
+  if (age_ms < this->offline_ms_)
+    return;
+  ESP_LOGW(TAG, "meter %u went offline (last frame %u ms ago), re-identifying",
+           this->slot_index_, (unsigned) age_ms);
+  this->offline_ = true;
+  this->ident_runs_ = 0;
+  this->step_ = MSTEP_START;
+  this->poll_ = MPOLL_IDLE;
+  this->waiting_ = false;
+  this->want_send_ = false;
+  this->ident_retry_at_ = 0;  // try at once; the backoff starts if that fails
+}
+
 void GrowattMeter::update() {
   if (!this->is_enabled() || this->waiting_)
     return;
+  this->check_offline_();
   if (this->step_ != MSTEP_DONE) {
     // A failed run schedules the next one. Retrying at the update interval
     // would put a meter that is simply not there back on the bus every couple
@@ -400,14 +428,24 @@ void GrowattMeter::advance_(bool ok) {
   // its hardware serves. Back off and start the whole run again instead.
   if (!ok) {
     this->ident_runs_++;
-    if (this->ident_runs_ < METER_IDENT_MAX_RUNS) {
+    // No attempt limit. Giving up would leave a meter that is merely
+    // unplugged permanently unidentified with nothing to bring it back, and
+    // the retry is what a probe would have been anyway: identification is the
+    // question "are you there and what are you", and both halves have to be
+    // answered before polling means anything. The log quietens down once the
+    // point is made, so a meter that is genuinely absent does not fill the
+    // log at one line a minute forever.
+    if (this->ident_runs_ <= METER_IDENT_LOUD_RUNS) {
       ESP_LOGW(TAG, "meter %u: identification incomplete at step %u "
-               "(attempt %u of %u), retrying in %u s", this->slot_index_,
-               this->step_, this->ident_runs_, METER_IDENT_MAX_RUNS,
+               "(attempt %u), retrying in %u s", this->slot_index_,
+               this->step_, this->ident_runs_,
                (unsigned) (METER_IDENT_RETRY_MS / 1000));
+      if (this->ident_runs_ == METER_IDENT_LOUD_RUNS)
+        ESP_LOGW(TAG, "meter %u: still trying, further attempts at debug",
+                 this->slot_index_);
     } else {
-      ESP_LOGE(TAG, "meter %u: identification failed %u times, not polling "
-               "until it answers", this->slot_index_, this->ident_runs_);
+      ESP_LOGD(TAG, "meter %u: identification attempt %u failed",
+               this->slot_index_, this->ident_runs_);
     }
     this->step_ = MSTEP_START;
     this->poll_ = MPOLL_IDLE;
@@ -423,6 +461,10 @@ void GrowattMeter::advance_(bool ok) {
     case MSTEP_MAIN:
       this->step_ = MSTEP_DONE;
       this->ident_runs_ = 0;
+      if (this->offline_) {
+        this->offline_ = false;
+        ESP_LOGI(TAG, "meter %u is back", this->slot_index_);
+      }
       this->publish_info_();
       break;
     default:

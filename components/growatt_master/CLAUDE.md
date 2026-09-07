@@ -512,6 +512,18 @@ total as unsigned turned a night time draw of -31.0 W into 429496704 W, which
 identification, so a sign error in one register silently rewrote the model's
 capacity and everything computed from it.
 
+Meters follow the same health contract as the inverters, for the same reason. A
+meter that has gone quiet for `device_offline_timeout` drops back to
+identification rather than continuing to poll: the model and phase count decided
+during identification are what size its poll blocks and what the hub's
+aggregates assume, so resuming against a meter that may have been swapped or
+re-addressed while it was away means deciding on stale premises. There is no
+separate probe state because identification is the probe - it asks "are you
+there" and "what are you" in one go, and a failed run already schedules its own
+backoff. Identification never gives up; giving up would leave an unplugged meter
+permanently unidentified with nothing to bring it back. The log quietens after
+three attempts so an absent meter does not fill it forever.
+
 Storage lives in one of two register families and never both. An SPH keeps it at
 holding/input 1000, a TL-X/TL-XH at input 3125 and up, with presence flagged by
 `BDC_OnOffState` at 3118 rather than by holding 183..185 - those read zero on a

@@ -161,6 +161,12 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
     return i < 3 ? this->phase_voltage_[i] : NAN;
   }
   uint32_t get_last_update() const { return this->last_update_; }
+  /// The hub owns these numbers; a meter needs its own copy to decide when the
+  /// data behind its identification has gone too old to keep polling on.
+  void set_health_timeouts(uint32_t stalled_ms, uint32_t offline_ms) {
+    this->stalled_ms_ = stalled_ms;
+    this->offline_ms_ = offline_ms;
+  }
   bool is_stale(uint32_t timeout_us) const {
     return this->last_update_ == 0 || (micros() - this->last_update_) > timeout_us;
   }
@@ -198,6 +204,7 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
   bool queued_(bool ok);
   void send_step_();
   void advance_(bool ok);
+  void check_offline_();
   void start_poll_();
   void send_poll_();
   void advance_poll_();
@@ -224,6 +231,12 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
   // what size its poll blocks.
   uint8_t ident_runs_{0};
   uint32_t ident_retry_at_{0};
+  // Mirrors of the hub's health thresholds, pushed down like the inverters'.
+  // Defaults match the hub's so a meter behaves sanely between construction
+  // and the first push.
+  uint32_t stalled_ms_{10000};
+  uint32_t offline_ms_{20000};
+  bool offline_{false};
   MeterPoll poll_{MPOLL_IDLE};
   uint32_t slow_interval_{30000};
   uint32_t last_slow_{0};
