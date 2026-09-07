@@ -793,7 +793,10 @@ void GrowattInverter::send_poll_() {
       ok = this->read_input_registers(POLL_FAST_STATUS_BASE, POLL_FAST_STATUS_CNT);
       break;
     case POLL_FAST_BAT:
-      ok = this->read_input_registers(POLL_FAST_BAT_BASE, POLL_FAST_BAT_CNT);
+      ok = this->caps_.storage_family == STORAGE_TLXH
+               ? this->read_input_registers(XH_FAST_BAT_BASE, XH_FAST_BAT_CNT)
+               : this->read_input_registers(POLL_FAST_BAT_BASE,
+                                            POLL_FAST_BAT_CNT);
       break;
     case POLL_FAST_UPS:
       ok = this->read_input_registers(POLL_FAST_UPS_BASE, POLL_FAST_UPS_CNT);
@@ -802,7 +805,11 @@ void GrowattInverter::send_poll_() {
       ok = this->read_input_registers(POLL_SLOW_MAIN_BASE, POLL_SLOW_MAIN_CNT);
       break;
     case POLL_SLOW_STOR:
-      ok = this->read_input_registers(POLL_SLOW_STOR_BASE, POLL_SLOW_STOR_CNT);
+      ok = this->caps_.storage_family == STORAGE_TLXH
+               ? this->read_input_registers(XH_SLOW_STOR_BASE,
+                                            XH_SLOW_STOR_CNT)
+               : this->read_input_registers(POLL_SLOW_STOR_BASE,
+                                            POLL_SLOW_STOR_CNT);
       break;
     default:
       return;
@@ -896,7 +903,11 @@ void GrowattInverter::advance_poll_() {
                          : (this->slow_due_ ? POLL_SLOW_MAIN : POLL_IDLE);
       break;
     case POLL_FAST_BAT:
-      this->poll_ = POLL_FAST_UPS;
+      // A TL-XH has no EPS terminal, so the block after this one is a read
+      // that can only ever return zeros on a bus that is the constraint.
+      this->poll_ = this->caps_.has_ups_block()
+                        ? POLL_FAST_UPS
+                        : (this->slow_due_ ? POLL_SLOW_MAIN : POLL_IDLE);
       break;
     case POLL_FAST_UPS:
       this->poll_ = this->slow_due_ ? POLL_SLOW_MAIN : POLL_IDLE;
@@ -1204,6 +1215,22 @@ void GrowattInverter::parse_fast_bat_(std::span<const uint16_t> data) {
   pub_val(this->battery_soc_sens_, this->battery_soc_pct_);
 }
 
+// Fast BDC block, input 3167..3181. Same entities as the SPH block above, with
+// the pack voltage at 0.01 V rather than 0.1 V and the charge and discharge
+// power the other way round in the register order.
+void GrowattInverter::parse_fast_bat_xh_(std::span<const uint16_t> data) {
+  pub2(this->bat_discharge_power_, data, XB_P_DISCHARGE, ONE_DEC);
+  pub2(this->bat_charge_power_, data, XB_P_CHARGE, ONE_DEC);
+  this->battery_voltage_v_ = reg16(data, XB_VBAT) * TWO_DEC;
+  pub_val(this->battery_voltage_, this->battery_voltage_v_);
+  this->battery_soc_pct_ = reg16(data, XB_SOC);
+  pub_val(this->battery_soc_sens_, this->battery_soc_pct_);
+  // On an SPH the pack temperature arrives with the slow block; here it is in
+  // the fast one, so the same entity simply updates more often.
+  pub1(this->battery_temperature_, data, XB_TEMP_A, ONE_DEC);
+  pub1(this->fault_word_, data, XB_FAULT, 1.0f);
+}
+
 // Fast UPS block, input 1067..1081. Also feeds the load average window.
 void GrowattInverter::parse_fast_ups_(std::span<const uint16_t> data) {
   // The frequency register reads 0 while the UPS output is idle, which is not
@@ -1265,19 +1292,39 @@ void GrowattInverter::parse_storage_(std::span<const uint16_t> data) {
   pub1(this->battery_health_, data, ST_BAT_HEALTH, 1.0f);
 }
 
+// Slow BDC/BMS block, input 3125..3231. Only the values the SPH slow block also
+// publishes are mapped, so the entity set is the same on both families. The
+// registers this family has and the other does not - the EPS totals, the BMS
+// cell extremes, the derate reason - are deliberately left for their own
+// change rather than smuggled in under a battery patch.
+void GrowattInverter::parse_storage_xh_(std::span<const uint16_t> data) {
+  pub2(this->discharge_energy_today_, data, XS_E_DISCHARGE_TODAY, ONE_DEC);
+  pub2(this->discharge_energy_total_, data, XS_E_DISCHARGE_TOTAL, ONE_DEC);
+  pub2(this->charge_energy_today_, data, XS_E_CHARGE_TODAY, ONE_DEC);
+  pub2(this->charge_energy_total_, data, XS_E_CHARGE_TOTAL, ONE_DEC);
+
+  pub1(this->bms_soc_, data, XS_BMS_SOC, 1.0f);
+  pub1(this->bms_voltage_, data, XS_BMS_VOLT, TWO_DEC);
+  pub1(this->bms_current_, data, XS_BMS_CURR, TWO_DEC);
+  pub1(this->bms_temperature_, data, XS_BMS_TEMP, ONE_DEC);
+  pub1(this->battery_cycles_, data, XS_BAT_CYCLES, 1.0f);
+  pub1(this->battery_health_, data, XS_BAT_HEALTH, 1.0f);
+}
+
 // Values that are computed rather than read. Kept in the component so the
 // YAML side only has to declare the sensor it wants to see.
 void GrowattInverter::publish_derived_() {
   if (!this->caps_.has_storage)
     return;
 
-  if (this->ups_total_power_ != nullptr) {
+  if (this->ups_total_power_ != nullptr && this->caps_.has_ups_block()) {
     float sum = this->ups_phase_power_[0] + this->ups_phase_power_[1] +
                 this->ups_phase_power_[2];
     this->ups_total_power_->publish_state(sum);
   }
 
-  if (this->ups_load_avg_ != nullptr && this->ups_avg_count_ > 0)
+  if (this->ups_load_avg_ != nullptr && this->caps_.has_ups_block() &&
+      this->ups_avg_count_ > 0)
     this->ups_load_avg_->publish_state(this->ups_load_avg_pct_);
 
   // Module count from pack voltage. module_voltage_ is configurable because it
@@ -1289,8 +1336,8 @@ void GrowattInverter::publish_derived_() {
 
   // Maximum sustainable discharge expressed as a percentage of the inverter
   // rating: usable pack energy divided by the discharge window.
-  if (this->ups_max_power_ != nullptr && this->normal_power_va_ > 0 &&
-      this->discharge_hours_ > 0) {
+  if (this->ups_max_power_ != nullptr && this->caps_.has_ups_block() &&
+      this->normal_power_va_ > 0 && this->discharge_hours_ > 0) {
     float pack_wh = modules * this->module_capacity_ * 1000.0f;
     float max_w = pack_wh / this->discharge_hours_;
     float pct = roundf(max_w / this->normal_power_va_ * 100.0f);
@@ -2212,6 +2259,7 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
   }
 
   if (this->poll_ != POLL_IDLE) {
+    const bool xh = this->caps_.storage_family == STORAGE_TLXH;
     switch (this->poll_) {
       case POLL_FAST_MAIN:
         if (data.size() >= POLL_FAST_MAIN_CNT)
@@ -2222,8 +2270,12 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
           this->parse_fast_status_(data);
         break;
       case POLL_FAST_BAT:
-        if (data.size() >= POLL_FAST_BAT_CNT)
+        if (xh) {
+          if (data.size() >= XH_FAST_BAT_CNT)
+            this->parse_fast_bat_xh_(data);
+        } else if (data.size() >= POLL_FAST_BAT_CNT) {
           this->parse_fast_bat_(data);
+        }
         break;
       case POLL_FAST_UPS:
         if (data.size() >= POLL_FAST_UPS_CNT)
@@ -2234,8 +2286,12 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
           this->parse_slow_main_(data);
         break;
       case POLL_SLOW_STOR:
-        if (data.size() >= POLL_SLOW_STOR_CNT)
+        if (xh) {
+          if (data.size() >= XH_SLOW_STOR_CNT)
+            this->parse_storage_xh_(data);
+        } else if (data.size() >= POLL_SLOW_STOR_CNT) {
           this->parse_storage_(data);
+        }
         break;
       default:
         break;
@@ -2475,6 +2531,10 @@ void GrowattInverter::dump_config() {
   ESP_LOGCONFIG(TAG, "  strings from config: %d (0=auto)", this->cfg_strings_);
   ESP_LOGCONFIG(TAG, "  ups from config: %d (-1=auto)", this->cfg_ups_);
   ESP_LOGCONFIG(TAG, "  battery from config: %d (-1=auto)", this->cfg_battery_);
+  if (this->caps_.storage_family != STORAGE_NONE)
+    ESP_LOGCONFIG(TAG, "  storage registers: %s",
+                  this->caps_.storage_family == STORAGE_TLXH
+                      ? "TL-XH (3125+)" : "SPH (1000+)");
   ESP_LOGCONFIG(TAG, "  battery module: %.2f V, %.2f kWh, %.2f h discharge",
                 this->module_voltage_, this->module_capacity_,
                 this->discharge_hours_);

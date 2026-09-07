@@ -222,6 +222,40 @@ static const uint8_t POLL_FAST_UPS_CNT = 15;    // UPS phases, load, PF
 static const uint16_t POLL_SLOW_STOR_BASE = 1000;
 static const uint8_t POLL_SLOW_STOR_CNT = 97;
 
+// TL-XH storage, same three blocks as the SPH above and read on the same
+// schedule, at the addresses that family uses. The slow block is one read
+// because 3125..3231 fits inside the 125 register limit; splitting it would
+// buy nothing and cost two more round trips on a bus that is already the
+// bottleneck.
+// The family also defines an EPS block at 3145..3161, but a MIN TL-XH has no
+// EPS terminal, so it is not polled and its addresses are not carried here.
+static const uint16_t XH_FAST_BAT_BASE = 3167;  // FaultCode..Pchr
+static const uint8_t XH_FAST_BAT_CNT = 15;
+static const uint16_t XH_SLOW_STOR_BASE = 3125;
+static const uint8_t XH_SLOW_STOR_CNT = 107;    // 3125..3231
+
+// Offsets into XH_FAST_BAT_BASE.
+static const uint8_t XB_FAULT = 0;          // 3167
+static const uint8_t XB_WARN = 1;           // 3168
+static const uint8_t XB_VBAT = 2;           // 3169, 0.01 V
+static const uint8_t XB_IBAT = 3;           // 3170, 0.1 A
+static const uint8_t XB_SOC = 4;            // 3171
+static const uint8_t XB_TEMP_A = 9;         // 3176, 0.1 C
+static const uint8_t XB_P_DISCHARGE = 11;   // 3178, DWORD 0.1 W
+static const uint8_t XB_P_CHARGE = 13;      // 3180, DWORD 0.1 W
+
+// Offsets into XH_SLOW_STOR_BASE.
+static const uint8_t XS_E_DISCHARGE_TODAY = 0;   // 3125
+static const uint8_t XS_E_DISCHARGE_TOTAL = 2;   // 3127
+static const uint8_t XS_E_CHARGE_TODAY = 4;      // 3129
+static const uint8_t XS_E_CHARGE_TOTAL = 6;      // 3131
+static const uint8_t XS_BMS_SOC = 90;            // 3215
+static const uint8_t XS_BMS_VOLT = 91;           // 3216, 0.01 V
+static const uint8_t XS_BMS_CURR = 92;           // 3217, 0.01 A
+static const uint8_t XS_BMS_TEMP = 93;           // 3218, 0.1 C
+static const uint8_t XS_BAT_CYCLES = 96;         // 3221
+static const uint8_t XS_BAT_HEALTH = 97;         // 3222
+
 // ---------------------------- writable registers ----------------------------
 static const uint16_t REG_ACTIVE_POWER_RATE = 3;  // holding, 0-100 percent
 
@@ -924,6 +958,12 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void parse_fast_status_(std::span<const uint16_t> data);
   void parse_slow_main_(std::span<const uint16_t> data);
   void parse_fast_bat_(std::span<const uint16_t> data);
+  /// The TL-XH counterparts. Separate functions rather than a shared one with
+  /// a base offset: the two families order and scale the same quantities
+  /// differently, so sharing the body would mean a family test on nearly
+  /// every line.
+  void parse_fast_bat_xh_(std::span<const uint16_t> data);
+  void parse_storage_xh_(std::span<const uint16_t> data);
   void parse_fast_ups_(std::span<const uint16_t> data);
   void parse_device_info_(std::span<const uint16_t> data);
   void parse_storage_(std::span<const uint16_t> data);

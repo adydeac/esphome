@@ -406,6 +406,33 @@ because they share a bus - they may not - but because the question being asked
 is the same one, and a second set of timeouts would be two things to tune where
 one will do.
 
+Storage lives in one of two register families and never both. An SPH keeps it at
+holding/input 1000, a TL-X/TL-XH at input 3125 and up, with presence flagged by
+`BDC_OnOffState` at 3118 rather than by holding 183..185 - those read zero on a
+TL-XH whatever is attached, which is why a MIN 6000TL-XH with a working ARK pack
+identified as grid-tie. `caps_.storage_family` is decided once during
+identification and then chooses every base address, so the parsers never test
+the model. The probe at 3118 only runs when the 1000 block came back empty, and
+an exception to it means "no such register on this model" rather than a failed
+read - otherwise a MOD would burn three identification passes on a question it
+cannot parse.
+
+A MIN TL-XH has no EPS terminal, so `has_ups` is false on that family and the
+EPS block at 3145 is never polled - the registers exist in the protocol but read
+dead on this hardware, and skipping them saves a round trip per cycle on the one
+resource that is actually scarce. `caps_.has_ups_block()` is the test, not
+`has_ups`: on an SPH the block exists whether or not the output is enabled, and
+a disabled UPS still reports through it.
+
+The two families publish the same entity set. What differs is scale and order,
+not meaning: pack voltage is 0.1 V at 1013 and 0.01 V at 3169, SOC sits beside
+it on one family and two registers along on the other, and the UPS load and
+power factor move by two because the TL-XH puts an EPS total before them. That
+is why the battery blocks get separate parsers rather than a shared one with a
+base offset - a shared body would need a family test on nearly every line, and
+the failure mode of getting it wrong is a plausible-looking number rather than
+an obvious one.
+
 Coming up is a separate question from going quiet, and it has its own window.
 `device_startup_grace` (60 s) governs a slot that has never answered, and it is
 counted from the first request the bus actually accepted rather than from boot.
