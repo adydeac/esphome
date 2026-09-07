@@ -1386,6 +1386,14 @@ void GrowattInverter::parse_storage_(std::span<const uint16_t> data) {
   pub1(this->bms_voltage_, data, ST_BMS_VOLT, TWO_DEC);
   pub1(this->bms_current_, data, ST_BMS_CURR, TWO_DEC);
   pub1(this->bms_temperature_, data, ST_BMS_TEMP, ONE_DEC);
+  // Input 1090, published raw and without a unit. It sits immediately after the
+  // BMS group at 1086..1089, where Growatt's map continues with current and
+  // gauge figures rather than energy, and it reads 25.0 on a pack of seven ARK
+  // 2.5H modules - 17.5 kWh installed. A figure that plausible as amperes and
+  // that implausible as kilowatt hours is the wrong register, not a scale
+  // error, so it stays as a diagnostic until a dump of 1086..1096 has been
+  // compared against what the BMS reports. Installed energy comes from
+  // battery_energy instead.
   pub1(this->battery_capacity_, data, ST_BAT_CAPACITY, ONE_DEC);
   pub1(this->battery_cycles_, data, ST_BAT_CYCLES, 1.0f);
   pub1(this->battery_health_, data, ST_BAT_HEALTH, 1.0f);
@@ -1433,11 +1441,18 @@ void GrowattInverter::publish_derived_() {
     modules = roundf(this->battery_voltage_v_ / this->module_voltage_);
   pub_val(this->battery_modules_, modules);
 
+  // What is installed, in the only terms that can be arrived at honestly: the
+  // module count measured from pack voltage times the configured size of a
+  // module. The inverter is not asked, because no register has been shown to
+  // answer it - see battery_capacity below and in README.md.
+  float pack_kwh = modules * this->module_capacity_;
+  pub_val(this->battery_energy_, pack_kwh);
+
   // Maximum sustainable discharge expressed as a percentage of the inverter
   // rating: usable pack energy divided by the discharge window.
   if (this->ups_max_power_ != nullptr && this->caps_.has_ups_block() &&
       this->normal_power_va_ > 0 && this->discharge_hours_ > 0) {
-    float pack_wh = modules * this->module_capacity_ * 1000.0f;
+    float pack_wh = pack_kwh * 1000.0f;
     float max_w = pack_wh / this->discharge_hours_;
     float pct = roundf(max_w / this->normal_power_va_ * 100.0f);
     if (pct > 100.0f)

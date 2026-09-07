@@ -994,6 +994,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   GI_SETTER(ups_load_avg, ups_load_avg_)
   GI_SETTER(ups_max_power, ups_max_power_)
   GI_SETTER(battery_modules, battery_modules_)
+  GI_SETTER(battery_energy, battery_energy_)
 #undef GI_SETTER
 
 #define GI_TSETTER(name, member) \
@@ -1377,6 +1378,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   sensor::Sensor *ups_load_avg_{nullptr};
   sensor::Sensor *ups_max_power_{nullptr};
   sensor::Sensor *battery_modules_{nullptr};
+  sensor::Sensor *battery_energy_{nullptr};
 
   text_sensor::TextSensor *control_ts_{nullptr};
   text_sensor::TextSensor *info_ts_{nullptr};

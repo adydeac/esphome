@@ -494,7 +494,9 @@ SENSORS = {
     "battery_soc": ("set_battery_soc", UNIT_PERCENT, 0, DEVICE_CLASS_BATTERY, _M),
     "battery_charge_power": ("set_battery_charge_power", _W, 1, _DW, _M),
     "battery_discharge_power": ("set_battery_discharge_power", _W, 1, _DW, _M),
-    "battery_capacity": ("set_battery_capacity", UNIT_KWH, 1, None, _M),
+    # Input 1090, raw. Unitless on purpose: see README.md - the register has
+    # not been shown to be an energy at all. Installed energy is battery_energy.
+    "battery_capacity": ("set_battery_capacity", None, 1, None, _M),
     "battery_cycles": ("set_battery_cycles", None, 0, None, _M),
     "battery_health": ("set_battery_health", UNIT_PERCENT, 0, None, _M),
     "battery_temperature": ("set_battery_temperature", _C, 1, _DT, _M),
@@ -529,6 +531,7 @@ SENSORS = {
     "ups_load_average": ("set_ups_load_avg", UNIT_PERCENT, 1, None, _M),
     "ups_max_power": ("set_ups_max_power", UNIT_PERCENT, 0, None, _M),
     "battery_modules": ("set_battery_modules", None, 0, None, _M),
+    "battery_energy": ("set_battery_energy", UNIT_KWH, 1, None, _M),
 }
 
 TEXT_SENSORS = {

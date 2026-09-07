@@ -209,13 +209,13 @@ because the blocks they come from are never read on it.
 | `bms_soc`, `bms_voltage`, `bms_current`, `bms_temperature` | – | input 1086..1089 | input 3215..3218 |
 | `battery_cycles`, `battery_health` | – | input 1095, 1096 | input 3221, 3222 |
 | `charge_energy_*`, `discharge_energy_*` | – | input 1052..1059 | input 3125..3132 |
-| `battery_capacity` | – | input 1090 (see below) | – |
+| `battery_capacity` | – | input 1090, raw (see below) | – |
 | `system_work_mode` | – | input 1000 | – |
 | `power_to_user`, `power_to_grid`, `local_load_power` | – | input 1021, 1029, 1037 | – |
 | `e_to_user_*`, `e_to_grid_*`, `e_load_*` | – | input 1044..1051, 1060..1063 | – |
 | UPS voltage/current/power per phase, load, PF | – | input 1067..1081 | – |
 | `ups_total_power`, `ups_load_avg`, `ups_max_power` | – | derived | – |
-| `battery_modules` | – | derived | derived |
+| `battery_modules`, `battery_energy` | – | derived | derived |
 
 ## Derived values
 
@@ -231,14 +231,21 @@ expressed as a percentage of the inverter rating:
 `modules * module_capacity / discharge_hours / normal_power`. It is only
 published on SPH, because it is the UPS output it describes.
 
-`battery_capacity` is **not** computed and should not be read as installed
-energy. It is input register 1090 with a kWh unit attached, and 1090 sits
-directly after the BMS group (SOC, voltage, current, temperature at 1086..1089)
-where Growatt's map continues with current and gauge figures, not energy. On the
-development fleet it reads 25.0 for a pack of 7 ARK 2.5H modules, which is 17.5
-kWh installed - a value that reads far more like amperes than kilowatt hours.
-Treat it as an unconfirmed raw register until a dump of 1086..1096 has been
-compared against what the BMS reports.
+`battery_energy` is what is installed: `battery_modules * module_capacity`, so
+7 modules of 2.5 kWh give 17.5 kWh. The inverter is not asked, because no
+register has been shown to answer the question - which is the whole point of
+the next paragraph. It is the same figure `ups_max_power` has always divided by
+the discharge window; it is simply published now.
+
+`battery_capacity` is input register 1090, published raw and without a unit. It
+sits directly after the BMS group (SOC, voltage, current, temperature at
+1086..1089) where Growatt's map continues with current and gauge figures, not
+energy, and on the development fleet it reads 25.0 for a pack of 7 ARK 2.5H
+modules - 17.5 kWh installed. A figure that plausible as amperes and that
+implausible as kilowatt hours is the wrong register, not a scale error. It had
+a kWh unit until now, which is what made it look like an answer. It stays as a
+diagnostic until a dump of 1086..1096 has been compared against what the BMS
+reports.
 
 ## Unmapped registers on TL-XH
 
