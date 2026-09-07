@@ -512,6 +512,32 @@ total as unsigned turned a night time draw of -31.0 W into 429496704 W, which
 identification, so a sign error in one register silently rewrote the model's
 capacity and everything computed from it.
 
+## On hold: making identification atomic
+
+`begin_identification_()` clears `caps_` before a run starts, so for the length
+of a re-identification the slot describes itself with configured defaults - this
+is where "1p L1" for a three phase unit comes from. The proper fix is for
+identification to build into a scratch copy and commit it on success.
+
+It is deliberately not done, and the reasoning matters more than the decision.
+The consumers that made it dangerous have each been closed at their own end:
+`controllable_()` requires `ident_trusted()`, protection limits require it too,
+and polling is suspended for the length of a run. What is left is cosmetic, and
+a failed run now restores the last complete description instead of leaving
+defaults, which removes the worst of that.
+
+The cost, on the other hand, is real: `caps_` has around forty write sites and
+is read from twenty, and it is not identification's alone - the live poll parser
+updates the phase and string counts during normal operation. So the change is
+not "identification writes elsewhere" but "identification builds a scratch while
+the live parser keeps writing the published copy", with every identification
+path reference moved to the scratch. A missed one reads stale values mid run and
+does so silently.
+
+Reconsider it when a new consumer of `caps_` appears that would need a guard of
+its own. That is the signal the per consumer approach has stopped paying, and
+until then each guard is cheaper and more verifiable than the refactor.
+
 Grid protection limits are written only from an identification that succeeded.
 An incomplete run still reaches `IDENT_DONE` - it has to, or the slot would
 never be polled again - so `step_` was never the right test; `ident_trusted()`

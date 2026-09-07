@@ -1182,6 +1182,13 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // limits means it can disconnect before the controller ever gets a chance to
   // reduce output.
   bool auto_protection_{true};
+  // What the last run that finished cleanly learned, and whether there is one.
+  // A re-identification wipes caps_ before it starts, so without this a failed
+  // run leaves the slot describing itself with configured defaults - worse than
+  // the description it had a minute earlier, which at least came from a unit
+  // that answered.
+  GrowattCaps caps_last_good_;
+  bool caps_last_good_valid_{false};
   bool protection_applied_{false};
   // One deferral notice per identification run, not one per update cycle.
   bool protection_deferred_logged_{false};

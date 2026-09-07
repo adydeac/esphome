@@ -442,6 +442,12 @@ void GrowattInverter::begin_identification_() {
   this->pac_total_hits_ = 0;
   this->nameplate_revised_ = false;
   this->rejected_count_ = 0;  // a fresh look includes what it will accept
+  // Keep what the last clean run learned before clearing, so a run that fails
+  // can put it back rather than leaving the slot on defaults.
+  if (!this->ident_incomplete_ && this->step_ == IDENT_DONE) {
+    this->caps_last_good_ = this->caps_;
+    this->caps_last_good_valid_ = true;
+  }
   this->caps_ = GrowattCaps{};        // clears the remembered string count too
   this->want_send_ = true;
 }
@@ -957,6 +963,23 @@ void GrowattInverter::advance_(bool ok) {
     this->apply_power_rate(this->power_percent_);
   }
   if (this->step_ == IDENT_DONE && this->ident_incomplete_) {
+    // Put back what the last clean run learned. A description from a unit that
+    // answered beats one assembled from configured defaults, and the defaults
+    // are what an interrupted run leaves behind: phase count, wiring and
+    // nameplate all sitting at their initial values, which is how a three phase
+    // unit comes to be published as single phase on L1.
+    //
+    // It can be wrong if the hardware was swapped while the slot was away, but
+    // then so are the defaults, and this at least describes something that was
+    // once there. ident_trusted() stays false either way, so nothing plans on
+    // it and no protection limits are written from it - this only decides what
+    // the entities and the aggregates show meanwhile.
+    if (this->caps_last_good_valid_) {
+      this->caps_ = this->caps_last_good_;
+      ESP_LOGW(TAG, "slot %u: keeping the capabilities from the last complete "
+               "identification", this->slot_index_);
+      this->publish_info_();
+    }
     this->ident_runs_++;
     if (this->ident_runs_ < IDENT_MAX_RUNS) {
       this->ident_retry_at_ = millis() + IDENT_RETRY_MS;
