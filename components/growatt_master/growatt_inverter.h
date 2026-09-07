@@ -1030,6 +1030,11 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // register.
   uint16_t setting_addr_(uint8_t field) const;
   uint16_t ac_charge_addr_() const;
+  /// Whether a field lives in the storage block. Most do not - the active rate,
+  /// the PV start voltage, the grid limits and the export limit are all valid
+  /// on a unit with no battery - so this is per field rather than a blanket
+  /// test on the slot.
+  static bool setting_is_storage_(uint8_t field);
   void publish_derived_();
   void publish_settings_();
   void apply_protection_limits_();

@@ -1931,14 +1931,35 @@ void GrowattInverter::apply_protection_limits_() {
   this->publish_settings_();
 }
 
+bool GrowattInverter::setting_is_storage_(uint8_t field) {
+  switch (field) {
+    case SET_GF_DISCHARGE_RATE:
+    case SET_GF_STOP_SOC:
+    case SET_BF_CHARGE_RATE:
+    case SET_BF_STOP_SOC:
+      return true;
+    default:
+      return false;
+  }
+}
+
 uint16_t GrowattInverter::setting_addr_(uint8_t field) const {
   if (field >= SET_COUNT)
+    return 0;
+  // No storage means no block to put these in. Falling through to the SPH
+  // table would send a battery setpoint to holding 1070 on a unit that has no
+  // 1070, which is a write nobody asked for against a register nobody mapped.
+  // Answering 0 puts it through the same door as a field the family lacks,
+  // which set_setting() already refuses.
+  if (this->caps_.storage_family == STORAGE_NONE && setting_is_storage_(field))
     return 0;
   return this->caps_.storage_family == STORAGE_TLXH ? XH_SETTING_ADDR[field]
                                                     : SETTING_ADDR[field];
 }
 
 uint16_t GrowattInverter::ac_charge_addr_() const {
+  if (this->caps_.storage_family == STORAGE_NONE)
+    return 0;
   return this->caps_.storage_family == STORAGE_TLXH ? XH_BF_AC_CHARGE
                                                     : HO_BF_AC_CHARGE;
 }
@@ -2007,9 +2028,14 @@ void GrowattInverter::set_register_switch(uint16_t address, uint16_t on_value,
 }
 
 void GrowattInverter::set_ac_charge(bool on) {
+  uint16_t addr = this->ac_charge_addr_();
+  if (addr == 0) {
+    ESP_LOGW(TAG, "slot %u: no storage, ignoring AC charge", this->slot_index_);
+    return;
+  }
   this->ac_charge_ = on;
   uint16_t v = on ? 1 : 0;
-  this->queue_write_(CMD_WRITE_SINGLE, this->ac_charge_addr_(), &v, 1);
+  this->queue_write_(CMD_WRITE_SINGLE, addr, &v, 1);
 }
 
 // ---------------------------- time windows ----------------------------
