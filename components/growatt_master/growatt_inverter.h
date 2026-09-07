@@ -659,6 +659,10 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   /// gone quiet: it has to survive a transport connect and a full identification
   /// pass competing with every other slot, and it only happens once.
   void set_startup_grace(uint32_t ms) { this->startup_grace_ms_ = ms; }
+  // The hub owns this one and the controller reads it from there, but the
+  // capability estimate is computed in the poll parser, which has no hub in
+  // reach and cannot ask whether a reading is old enough to mean anything.
+  void set_settle_time(uint32_t ms) { this->settle_ms_ = ms; }
 
   // Live values the hub needs for its threshold conditions. NaN until the
   // matching block has been read at least once.
@@ -1100,6 +1104,10 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   float capability_w_{NAN};
   uint32_t cap_time_{0};
   float cap_ratio_{0.9f};
+  // Mirror of the hub's control_settle_time. Default matches the hub's so a
+  // slot behaves sanely in the window between construction and the first
+  // setting push.
+  uint32_t settle_ms_{30000};
   uint32_t cap_window_ms_{3600000};
   bool rate_binding_{false};
   uint32_t ctrl_probe_ms_{0};

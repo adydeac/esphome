@@ -1671,10 +1671,30 @@ void GrowattInverter::update_capability_() {
       this->power_percent_ == 0)
     return;
 
+  // A reading taken while the unit is still moving to a new setpoint is not
+  // evidence about that setpoint. Output lags the command by fifteen to thirty
+  // seconds, which is what control_settle_time exists to describe, and this was
+  // the one consumer of output that ignored it: a rate cut extrapolates from an
+  // output that has not fallen yet, and the ratchet below then keeps that
+  // inflated figure for a whole window.
+  //
+  // The whole function waits, expiry included. Holding a settled estimate
+  // through a ramp is exactly right: it was taken when the reading meant
+  // something, and the ramp it is being held through is the one it authorised.
+  //
+  // This is necessary and not sufficient. A settled reading still cannot tell
+  // "the setpoint is holding it back" from "the panels are, and the setpoint
+  // happens to be just above what they give", because both put output near
+  // cap_ratio times the implied limit. Only moving the setpoint and watching
+  // whether output follows separates them, and that is a two point test this
+  // does not attempt.
+  uint32_t now = millis();
+  if (this->since_last_move(now) < this->settle_ms_)
+    return;
+
   float limit = this->normal_power_va_ * this->power_percent_ / 100.0f;
   this->rate_binding_ = limit > 0 && this->grid_power_w_ >= this->cap_ratio_ * limit;
 
-  uint32_t now = millis();
   if (!std::isnan(this->capability_w_) &&
       now - this->cap_time_ > this->cap_window_ms_) {
     ESP_LOGD(TAG, "slot %u: capability estimate expired", this->slot_index_);

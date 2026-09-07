@@ -85,6 +85,7 @@ void GrowattHub::setup() {
     inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
     inv->set_offline_probe_interval(this->offline_probe_ms_);
     inv->set_startup_grace(this->startup_grace_ms_);
+    inv->set_settle_time(this->settle_ms_);
   }
 
   // Both timers start now rather than at zero, which would make them due on the
@@ -154,14 +155,16 @@ void GrowattHub::apply_setting_(uint8_t field) {
       break;
     default: return;  // a plain threshold, read from values_ where it is used
   }
-  // The health timeouts and the protection margin are pushed down to the
-  // inverters, which hold their own copies.
+  // The health timeouts, the protection margin and the settle time are pushed
+  // down to the inverters, which hold their own copies.
   if (field == HUB_STALLED_TIMEOUT || field == HUB_OFFLINE_TIMEOUT ||
-      field == HUB_OFFLINE_PROBE || field == HUB_STARTUP_GRACE) {
+      field == HUB_OFFLINE_PROBE || field == HUB_STARTUP_GRACE ||
+      field == HUB_SETTLE_TIME) {
     for (auto *inv : this->inverters_) {
       inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
       inv->set_offline_probe_interval(this->offline_probe_ms_);
       inv->set_startup_grace(this->startup_grace_ms_);
+      inv->set_settle_time(this->settle_ms_);
     }
   }
 }
