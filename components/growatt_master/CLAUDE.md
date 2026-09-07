@@ -434,6 +434,19 @@ checked with a one register probe every 60 s instead. When it answers, it is
 re-identified from scratch, because everything it was told may have been lost
 across the power cycle — and that also re-applies the trip limits.
 
+There is exactly one response timeout, and it is the hub's `send_wait_time`.
+This component used to keep a second, shorter one of its own (1500 ms against a
+2000 ms default), which meant it abandoned a request the hub was still waiting
+on: the retry could not go out because the hub had not released the bus, and the
+answer - routinely 1700-2000 ms on `modbus_tcp` - arrived to a slot that had
+stopped listening and was discarded as a late transaction. Both watchdogs were
+right about their own question and wrong about each other's. `on_no_response()`
+and `on_not_sent()` are the hub telling us its verdict, and taking the verdict
+from there removes the disagreement by construction rather than by tuning two
+numbers to agree. What is left in `loop()` is a 15 s backstop for a terminal
+callback that never arrives at all, which logs at ERROR because reaching it
+means the hub broke its contract.
+
 An identification run that *times out* is different from one that reads zeros.
 Zeros are a definitive "not supported"; silence tells us nothing, and treating
 the two alike would quietly downgrade a storage inverter to grid tie after one

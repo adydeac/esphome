@@ -13,7 +13,11 @@ static const char *const CONV_NAMES[CONV_MODE_COUNT] = {"Auto", "Phase", "Line"}
 
 
 // Growatt doc page 8: minimum 850ms between commands, 1s suggested.
-static const uint32_t IDENT_TIMEOUT_MS = 1500;
+// Not a response timeout - the hub's send_wait_time is the response timeout, and
+// a second, shorter one here is what this replaces. Only a terminal callback
+// that never arrives at all gets this far, so the value only has to be above any
+// send_wait_time anyone would configure.
+static const uint32_t STALL_BACKSTOP_MS = 15000;
 static const uint8_t IDENT_MAX_RETRIES = 2;
 
 // After finishing a transaction a device waits this long before asking for the
@@ -644,15 +648,52 @@ void GrowattInverter::try_send_() {
     this->send_step_();
 }
 
+// The hub is the one that decides a request has gone unanswered, and it says so
+// through on_no_response(). This is that decision arriving; the recovery below
+// is unchanged, only its trigger moved.
+bool GrowattInverter::on_no_response(std::span<const uint8_t> request_pdu) {
+  if (this->waiting_)
+    this->no_answer_("no response");
+  // The hub would re-queue the same frame for us. Declining keeps the choice
+  // here, where the retry budget, the write queue and the identification step
+  // all live, and where a retry has always been decided.
+  return false;
+}
+
+// Accepted into the machine and then discarded before it reached the wire -
+// a queue cleared out from under it. Same hole in the state machine as a
+// silence, so the same recovery: this is a terminal callback like any other,
+// and nothing else is coming for that request.
+void GrowattInverter::on_not_sent(std::span<const uint8_t> request_pdu) {
+  if (this->waiting_)
+    this->no_answer_("never sent");
+}
+
 void GrowattInverter::loop() {
   if (this->want_send_ && !this->waiting_)
     this->try_send_();
 
   if (!this->waiting_)
     return;
-  if (millis() - this->last_send_ < IDENT_TIMEOUT_MS)
-    return;
 
+  // Not the timeout - the hub owns that. This is a watchdog of last resort for
+  // a terminal callback that never arrived at all, which would otherwise leave
+  // this slot waiting forever with no timer left to rescue it. It is set well
+  // above any send_wait_time worth configuring, so reaching it means the hub
+  // broke its own contract: log it as the fault it is rather than papering over
+  // it at DEBUG among the ordinary retries.
+  if (millis() - this->last_send_ < STALL_BACKSTOP_MS)
+    return;
+  ESP_LOGE(TAG, "slot %u: no terminal callback %u ms after send, recovering",
+           this->slot_index_, (unsigned) STALL_BACKSTOP_MS);
+  this->no_answer_("lost callback");
+}
+
+// Everything that follows a request resolving with nothing usable in it. Split
+// out of loop() when the hub's callback became the trigger, so that a silence,
+// a discarded frame and the backstop all leave the state machine in the same
+// place - which is the property the whole retry path depends on.
+void GrowattInverter::no_answer_(const char *why) {
   this->waiting_ = false;
   this->retries_++;
   this->bus_release_ = millis();
@@ -667,8 +708,8 @@ void GrowattInverter::loop() {
   }
 
   if (this->retries_ <= IDENT_MAX_RETRIES) {
-    ESP_LOGD(TAG, "slot %u: timeout (step %u, poll %u), retrying (%u/%u)",
-             this->slot_index_, this->step_, this->poll_, this->retries_,
+    ESP_LOGD(TAG, "slot %u: %s (step %u, poll %u), retrying (%u/%u)",
+             this->slot_index_, why, this->step_, this->poll_, this->retries_,
              IDENT_MAX_RETRIES);
     this->want_send_ = true;
     return;

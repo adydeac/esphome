@@ -430,6 +430,13 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void on_write_multiple_registers(uint16_t start_address,
                                    std::span<const uint16_t> registers,
                                    modbus::ResponseStatus status) override;
+  // The hub's verdict that a request went unanswered, and its verdict that one
+  // was dropped before it reached the wire. Both are terminal: nothing else is
+  // coming for that request, and this slot's state machine has to be told, or
+  // it waits forever. Overriding them is what removes the second, shorter
+  // timeout this component used to keep for itself.
+  bool on_no_response(std::span<const uint8_t> request_pdu) override;
+  void on_not_sent(std::span<const uint8_t> request_pdu) override;
   // Replies that do not match the request's shape land here instead of being
   // delivered short; see the definition.
   void on_custom_response(std::span<const uint8_t> request_pdu,
@@ -896,6 +903,10 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // Starts a run without clearing the attempt counter, so an automatic retry
   // after a failed run cannot loop forever.
   void begin_identification_();
+  /// Recovery for a request that resolved with nothing usable: a silence, a
+  /// frame discarded before it was sent, or the backstop. `why` is the word
+  /// that goes in the retry log line.
+  void no_answer_(const char *why);
   void update_health_();
   void zero_instantaneous_();
   void send_probe_();
