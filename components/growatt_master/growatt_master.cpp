@@ -633,6 +633,10 @@ void GrowattHub::refresh_all_() {
   }
 }
 
+bool GrowattHub::controllable_(GrowattInverter *inv) {
+  return inv->is_enabled() && inv->is_online() && inv->ident_done();
+}
+
 float GrowattHub::headroom_up_(GrowattInverter *inv, const float *err) {
   if (inv->get_phases() >= 3) {
     // Spreads evenly over three phases, so the phase with the least headroom

@@ -326,9 +326,9 @@ class GrowattHub : public PollingComponent {
   /// production; not cutting it because it was still identifying costs a trip
   /// or an export breach. Reductions stay unconditional, as they are
   /// everywhere else in this controller.
-  static bool controllable_(GrowattInverter *inv) {
-    return inv->is_enabled() && inv->is_online() && inv->ident_done();
-  }
+  /// Defined in the .cpp: growatt_inverter.h includes this header, so the
+  /// dependency only runs one way and the type is incomplete here.
+  static bool controllable_(GrowattInverter *inv);
 
   float headroom_up_(GrowattInverter *inv, const float *err);
   // How much this inverter must shed to clear the export on one specific
