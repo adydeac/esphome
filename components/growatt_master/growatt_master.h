@@ -148,14 +148,15 @@ enum HubSetting : uint8_t {
   HUB_SETTING_COUNT,
 };
 
-// Persistence layout. Every stored structure carries a version and a block of
-// reserved bytes, so a new field can be added later by spending reserved space
-// without changing sizeof - which is what makes the difference between "the new
-// setting starts at its default" and "every stored setting is lost", since a
-// size mismatch makes load() fail wholesale.
+// Persistence layout. Every stored structure carries a version, because a size
+// mismatch makes load() fail wholesale and lose every stored setting, while a
+// layout whose meaning changed at constant size would be read back silently
+// wrong.
 //
 // Bump PREFS_VERSION only when the meaning of existing fields changes. Adding a
-// field out of the reserved block does not need it.
+// field does not need it: the written mask below says which slots the writing
+// firmware actually knew about, so a longer enum reads the trailing zeroes for
+// what they are.
 // 2: the startup rate was removed and every setting after it shifted down one
 // slot. Same size, different meaning - exactly what the version byte is for.
 static const uint8_t PREFS_VERSION = 2;
@@ -164,14 +165,20 @@ struct GrowattHubPrefs {
   uint8_t version;
   uint8_t offline_action;
   float values[HUB_SETTING_COUNT];
-  // Grew by the four bytes the startup rate used to occupy, then by the four
-  // HUB_SETTLE_TIME takes, then by the four HUB_STARTUP_GRACE takes. Keeping
-  // sizeof constant is what lets load() still succeed; the version byte is what
-  // stops it misreading the shifted fields. A field added out of here reads back
-  // as zero on the first boot after the upgrade, so setup() restores the
-  // configured default in that case.
-  uint8_t reserved[4];
+  // Bit i is set when values[i] was written by the firmware that saved this
+  // store. Zero means the store predates the mask, which setup() handles
+  // separately. This occupies the four bytes that used to be reserved for one
+  // more setting: growing the enum past what fits here changes sizeof and costs
+  // a one time fall back to the configured defaults, which is the honest price
+  // of never again reading an absent setting as a deliberate zero.
+  uint32_t written;
 } __attribute__((packed));
+
+// The mask is what makes an added setting safe, so it has to keep covering the
+// whole enum. Past this point the store needs a wider mask and the size change
+// that comes with it.
+static_assert(HUB_SETTING_COUNT <= 32,
+              "GrowattHubPrefs::written cannot describe more than 32 settings");
 
 // What to do once the meter is definitively gone. Stopping is the safe default
 // for an export limited site, because without the meter there is no way to know

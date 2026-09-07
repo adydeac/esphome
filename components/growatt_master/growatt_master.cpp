@@ -30,31 +30,41 @@ void GrowattHub::setup() {
   this->pref_ = global_preferences->make_preference<GrowattHubPrefs>(hash);
 
 
-  // Settings added out of the reserved block read back as zero from a store
-  // written before they existed. Zero is not a usable settle time, so the
-  // configured default is kept rather than letting the feature silently
-  // disable itself on the first boot after an upgrade.
-  float settle_default = this->values_[HUB_SETTLE_TIME];
-  float grace_default = this->values_[HUB_STARTUP_GRACE];
+  // set_default() has already filled values_ with what the YAML asked for.
+  // Anything the store does not carry has to keep it, so the defaults are held
+  // aside for the legacy test below rather than being overwritten in place.
+  float configured[HUB_SETTING_COUNT];
+  for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
+    configured[i] = this->values_[i];
 
   GrowattHubPrefs p{};
   if (this->pref_.load(&p)) {
     if (p.version == PREFS_VERSION) {
-      for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
-        this->values_[i] = p.values[i];
-      if (this->values_[HUB_SETTLE_TIME] <= 0) {
-        this->values_[HUB_SETTLE_TIME] = settle_default;
-        ESP_LOGI(TAG, "settle time not in the stored settings, using %.0f s",
-                 settle_default);
-      }
-      if (this->values_[HUB_STARTUP_GRACE] <= 0) {
-        this->values_[HUB_STARTUP_GRACE] = grace_default;
-        ESP_LOGI(TAG, "startup grace not in the stored settings, using %.0f s",
-                 grace_default);
+      // A store written before the mask existed carries no record of what it
+      // knew. Everything that firmware knew, it wrote, so a stored zero is
+      // either a deliberate zero or a slot that did not exist yet - and the
+      // configured default is the only thing that can tell the two apart. A
+      // setting whose default is itself zero reads the same either way, which
+      // is why this is a one boot heuristic and the mask is the real fix.
+      bool legacy = p.written == 0;
+      uint8_t defaulted = 0;
+      for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++) {
+        bool stored = legacy ? !(p.values[i] == 0.0f && configured[i] != 0.0f)
+                             : (p.written & (1u << i)) != 0;
+        if (stored)
+          this->values_[i] = p.values[i];
+        else
+          defaulted++;  // values_[i] still holds the configured default
       }
       if (p.offline_action < OFF_ACTION_COUNT)
         this->offline_action_ = p.offline_action;
-      ESP_LOGI(TAG, "restored settings from flash");
+      if (defaulted == 0)
+        ESP_LOGI(TAG, "restored settings from flash");
+      else
+        ESP_LOGI(TAG,
+                 "restored settings from flash, %u not in the store kept at "
+                 "their configured default",
+                 defaulted);
     } else {
       // Same size, different meaning. Falling back to the configured defaults
       // is the only safe reading of that.
@@ -92,6 +102,10 @@ void GrowattHub::save_prefs_() {
   p.offline_action = this->offline_action_;
   for (uint8_t i = 0; i < HUB_SETTING_COUNT; i++)
     p.values[i] = this->values_[i];
+  // Every field this firmware knows is written, so the mask is all of them. It
+  // says nothing to this build and everything to the next one, which will read
+  // this store with a longer enum.
+  p.written = HUB_SETTING_COUNT == 32 ? ~0u : (1u << HUB_SETTING_COUNT) - 1u;
   this->pref_.save(&p);
 }
 
@@ -1454,6 +1468,16 @@ void GrowattHub::dump_config() {
   ESP_LOGCONFIG(TAG, "  gain %.2f up / %.2f down, step %.1f..%.1f %%",
                 this->increase_gain_, this->decrease_gain_, this->min_step_,
                 this->max_step_);
+  // Both of these decide how fast the controller may raise anything, and both
+  // are pushed down into the inverters at boot, so a bad value here shows up as
+  // a slow ramp rather than as an error. Print them where a slow ramp is
+  // diagnosed from.
+  ESP_LOGCONFIG(TAG,
+                "  settle %u ms, capability binding above %.2f of the implied "
+                "limit, estimate valid %u s",
+                (unsigned) this->settle_ms_,
+                this->values_[HUB_CAPABILITY_RATIO],
+                (unsigned) lroundf(this->values_[HUB_CAPABILITY_WINDOW]));
 }
 
 }  // namespace growatt_master

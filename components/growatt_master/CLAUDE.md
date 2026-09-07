@@ -347,6 +347,16 @@ preference keys precisely to dodge the size problem. That works, but it scatters
 one device's state across several keys and the reason is invisible at the call
 site. The reserved block is the same idea made explicit.
 
+Reserved space alone is not enough, though, and the hub settings show why. A
+setting added out of the reserved block reads back as zero from a store written
+before it existed, and a restore loop that copies every slot cannot tell that
+zero from a deliberate one: it overwrites the configured default and disables
+the new setting on every boot from then on. `GrowattHubPrefs` therefore carries
+a `written` bitmask saying which slots the writing firmware knew about, and the
+restore skips the rest. A store with an all zero mask predates the mask itself
+and falls back to a heuristic for one boot: a stored zero where the configured
+default is non zero is an absent setting, not a chosen value.
+
 ## Configuration that lives in entities, not YAML
 
 Almost all tuning is a runtime entity now, not a compile time option. The
