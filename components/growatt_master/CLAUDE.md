@@ -1079,10 +1079,18 @@ files change together, replace all of them.
 
 ## Still unverified
 
-- What input 1090 on an SPH actually is. It is published as `battery_capacity`
-  in kWh and reads 25.0 for a 17.5 kWh pack. A dump of 1086..1096 compared
-  against what the BMS reports would settle it; until then the sensor is not
-  evidence of anything.
+- What input 1090 on an SPH actually is. It is published as `battery_capacity`,
+  raw and unitless since the kWh label came off, and reads 25.0 for a pack of
+  seven ARK 2.5H modules - 17.5 kWh installed. It sits straight after the BMS
+  group at 1086..1089, where the map continues with current and gauge figures,
+  so the working theory is that it is a current and not an energy at all.
+  Settling it takes one measurement: dump holding and input 1086..1096 on
+  growatt02 with the register dump button and compare each word against what
+  the BMS reports in ShinePhone - pack current and the gauge remaining and full
+  charge figures are the ones to look for. If it turns out to be a current, map
+  it as one and give it back a unit; if it is energy after all, `battery_energy`
+  becomes a cross check rather than the only answer. Until then nothing should
+  be derived from it, and installed energy comes from `battery_energy`.
 - Where the TL-XH family keeps grid-first and battery-first control. The SPH
   addresses are read on those units and answer with zeros, so the entities are
   currently decorative.
@@ -1126,6 +1134,47 @@ files change together, replace all of them.
   anything in software.
 
 ## Started but not built
+
+**Making the capability estimate mean something on a PV limited unit.** This is
+the open question behind every slow ramp, and two different changes have been
+proposed for it. Neither is written.
+
+The estimate is `grid_power * 100 / power_percent`, recorded only while the
+ratio test says our setpoint is what the unit is hitting. Two fixes already
+landed - the settle gate, so the reading is not taken mid ramp, and the
+persistence fix that restored the ratio and the window to their configured
+values - and between them the collapse seen in the September logs should be
+gone. What they do not fix is the test itself. A single settled sample cannot
+separate "our setpoint is holding it back" from "the panels are, and our
+setpoint happens to sit just above what they give": both leave output near
+`cap_ratio` times the implied limit. Simulated against a 6 kVA unit whose real
+capability was 2300 W, held at 40 %, the estimate comes out at 5708 W with the
+gate and without it alike.
+
+The two candidates:
+
+*A geometric probe.* Today a unit with no estimate is probed at `min_step`,
+one percent per settle window, so testing whether it can produce at all takes
+up to a hundred windows - fifty minutes at the default thirty seconds. Doubling
+instead (1, 2, 4, 8...) reaches the same place in seven. It is cheap and it is
+a palliative: it arrives at the top faster without ever knowing whether it was
+allowed to. The cost of overshooting is one window of export, which the
+reduction path catches, and reductions are always safe.
+
+*A two point test.* Move the setpoint deliberately and watch whether output
+follows in proportion. That is the only thing that distinguishes the two cases,
+and it needs both samples settled, which is why the settle gate is a
+prerequisite rather than an alternative. It is the real fix and the larger
+change: it needs somewhere to hold the previous (rate, output) pair per slot,
+a rule for when a pair is stale, and a decision about what to conclude when the
+sun moves between the two samples - which is the failure mode that makes this
+harder than it looks.
+
+Which one, or both in that order, is unsettled and should be decided from a
+clear day's log rather than from argument: if the two fixes already applied
+have restored the ramp, the probe may not be worth its complexity at all.
+
+
 
 **Battery charge rate as a controllable load.** When the property is importing
 and no inverter can raise its output, the remaining lever is the storage unit's
