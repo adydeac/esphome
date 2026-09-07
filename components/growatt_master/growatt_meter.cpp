@@ -10,6 +10,11 @@ static const char *const TAG = "growatt_meter";
 
 static const uint32_t METER_TIMEOUT_MS = 1500;
 static const uint8_t METER_MAX_RETRIES = 2;
+// Retries above are within one step; these bound whole identification runs.
+// Three is enough to ride out a busy bus, and the interval matches the probe
+// the inverters use for a slot that has gone quiet.
+static const uint8_t METER_IDENT_MAX_RUNS = 3;
+static const uint32_t METER_IDENT_RETRY_MS = 60000;
 
 // Matches BUS_YIELD_MS in growatt_inverter.cpp: step aside after our own
 // transaction so the other devices on the bus get a turn.
@@ -187,6 +192,11 @@ void GrowattMeter::restart_identification() {
     ESP_LOGW(TAG, "meter %u: cannot identify, address is 0", this->slot_index_);
     return;
   }
+  // An explicit restart - a model or address change, or the user asking - is a
+  // fresh start, not a continuation of a failed run, so the attempt count and
+  // the backoff both clear.
+  this->ident_runs_ = 0;
+  this->ident_retry_at_ = 0;
   this->step_ = MSTEP_START;
   this->poll_ = MPOLL_IDLE;
   this->retries_ = 0;
@@ -234,6 +244,14 @@ void GrowattMeter::update() {
   if (!this->is_enabled() || this->waiting_)
     return;
   if (this->step_ != MSTEP_DONE) {
+    // A failed run schedules the next one. Retrying at the update interval
+    // would put a meter that is simply not there back on the bus every couple
+    // of seconds, which is the cost the inverters already back off from.
+    if (this->ident_retry_at_ != 0) {
+      if ((int32_t) (millis() - this->ident_retry_at_) < 0)
+        return;
+      this->ident_retry_at_ = 0;
+    }
     this->want_send_ = true;
     this->try_send_();
     return;
@@ -374,12 +392,37 @@ void GrowattMeter::send_poll_() {
 void GrowattMeter::advance_(bool ok) {
   this->retries_ = 0;
   this->waiting_ = false;
+
+  // A step that went unanswered is not a step that produced a value. Carrying
+  // on regardless publishes an identification assembled from whatever the
+  // members happened to hold - model Auto, zero phases, a blank id - and the
+  // meter then polls the block that classification implies rather than the one
+  // its hardware serves. Back off and start the whole run again instead.
+  if (!ok) {
+    this->ident_runs_++;
+    if (this->ident_runs_ < METER_IDENT_MAX_RUNS) {
+      ESP_LOGW(TAG, "meter %u: identification incomplete at step %u "
+               "(attempt %u of %u), retrying in %u s", this->slot_index_,
+               this->step_, this->ident_runs_, METER_IDENT_MAX_RUNS,
+               (unsigned) (METER_IDENT_RETRY_MS / 1000));
+    } else {
+      ESP_LOGE(TAG, "meter %u: identification failed %u times, not polling "
+               "until it answers", this->slot_index_, this->ident_runs_);
+    }
+    this->step_ = MSTEP_START;
+    this->poll_ = MPOLL_IDLE;
+    this->ident_retry_at_ = millis() + METER_IDENT_RETRY_MS;
+    this->want_send_ = false;
+    return;
+  }
+
   switch (this->step_) {
     case MSTEP_ID:
       this->step_ = MSTEP_MAIN;
       break;
     case MSTEP_MAIN:
       this->step_ = MSTEP_DONE;
+      this->ident_runs_ = 0;
       this->publish_info_();
       break;
     default:

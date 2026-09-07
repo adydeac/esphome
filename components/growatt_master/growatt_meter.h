@@ -218,6 +218,12 @@ class GrowattMeter : public PollingComponent, public modbus::ModbusClientDevice 
 
   uint8_t slot_index_{0};
   MeterStep step_{MSTEP_START};
+  // Identification attempts that ended with a step unanswered, and when the
+  // next attempt is due. A meter that cannot describe itself must not be
+  // treated as described: the model and phase count it fails to report are
+  // what size its poll blocks.
+  uint8_t ident_runs_{0};
+  uint32_t ident_retry_at_{0};
   MeterPoll poll_{MPOLL_IDLE};
   uint32_t slow_interval_{30000};
   uint32_t last_slow_{0};
