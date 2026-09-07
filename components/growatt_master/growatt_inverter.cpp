@@ -409,10 +409,25 @@ void GrowattInverter::update_health_() {
     // there is nothing to wait a timeout for. Declaring it offline at once
     // keeps it off the bus and off the dispatch.
     h = INV_OFFLINE;
+  } else if (!this->ever_asked_) {
+    // Never asked anything yet, so there is nothing to conclude. try_send_()
+    // only queues a frame once the bus will take one, and a modbus_tcp hub will
+    // not take one until its socket is up - so this state covers the whole
+    // period in which the transport is still finding its way to the inverter.
+    // A slot cannot be blamed for silence it was never given a chance to break.
+    h = INV_ONLINE;
   } else if (this->last_update_ == 0) {
-    // Nothing heard yet. Assume it is there long enough for identification to
-    // get a chance, then give up if it never answers.
-    h = (now > this->offline_ms_) ? INV_OFFLINE : INV_ONLINE;
+    // Asked, never answered. The window is measured from the first request that
+    // actually left this node rather than from boot, because boot is much
+    // earlier than that: WiFi association, DHCP, the transport's connect - which
+    // a modbus_tcp hub retries no sooner than reconnect_interval - and the other
+    // slots taking their turn all land in between. Measured from uptime, a slot
+    // is written off before it has been asked twice, and then serves a full
+    // offline_probe_interval of enforced silence for a fault that was never its
+    // own. Its own window too, not offline_ms_: coming up cold is a different
+    // question from having gone quiet, it is slower, and it happens once.
+    h = (now - this->first_send_ms_ > this->startup_grace_ms_) ? INV_OFFLINE
+                                                               : INV_ONLINE;
   } else {
     uint32_t age = (micros() - this->last_update_) / 1000;
     if (age < this->stalled_ms_)
@@ -497,6 +512,13 @@ void GrowattInverter::zero_instantaneous_() {
 bool GrowattInverter::queued_(bool ok) {
   if (ok) {
     this->last_send_ = millis();
+    // The moment this slot was first actually asked something, which is what
+    // update_health_() measures its startup window from. Only a frame the bus
+    // accepted counts: a refusal means the question was never put.
+    if (!this->ever_asked_) {
+      this->ever_asked_ = true;
+      this->first_send_ms_ = this->last_send_;
+    }
     this->waiting_ = true;
     return true;
   }

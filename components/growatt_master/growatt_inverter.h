@@ -527,6 +527,12 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
     this->offline_ms_ = offline_ms;
   }
   void set_offline_probe_interval(uint32_t ms) { this->offline_probe_ms_ = ms; }
+  /// How long a slot that has never answered is given before it is written off,
+  /// counted from the first request that actually reached the bus. Separate
+  /// from offline_ms_ because coming up cold is a different question from having
+  /// gone quiet: it has to survive a transport connect and a full identification
+  /// pass competing with every other slot, and it only happens once.
+  void set_startup_grace(uint32_t ms) { this->startup_grace_ms_ = ms; }
 
   // Live values the hub needs for its threshold conditions. NaN until the
   // matching block has been read at least once.
@@ -925,6 +931,13 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint32_t stalled_ms_{10000};
   uint32_t offline_ms_{20000};
   uint32_t offline_probe_ms_{60000};
+  uint32_t startup_grace_ms_{60000};
+  // millis() of the first request the bus accepted for this slot, and whether
+  // there has been one. A separate flag rather than treating zero as "never":
+  // millis() is not zero by the time anything sends, but a state machine that
+  // depends on that is one worth not writing.
+  uint32_t first_send_ms_{0};
+  bool ever_asked_{false};
   uint32_t last_probe_{0};
   bool probing_{false};
   PollBlock poll_{POLL_IDLE};

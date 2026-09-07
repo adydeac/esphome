@@ -144,6 +144,7 @@ enum HubSetting : uint8_t {
   HUB_CAPABILITY_RATIO,    // fraction of the implied limit that counts as "binding"
   HUB_CAPABILITY_WINDOW,   // s, how long a capability estimate stays valid
   HUB_SETTLE_TIME,         // s, how long a unit is given to answer a setpoint
+  HUB_STARTUP_GRACE,       // s, before a slot that has never answered is dropped
   HUB_SETTING_COUNT,
 };
 
@@ -164,11 +165,12 @@ struct GrowattHubPrefs {
   uint8_t offline_action;
   float values[HUB_SETTING_COUNT];
   // Grew by the four bytes the startup rate used to occupy, then by the four
-  // HUB_SETTLE_TIME takes. Keeping sizeof constant is what lets load() still
-  // succeed; the version byte is what stops it misreading the shifted fields.
-  // A field added out of here reads back as zero on the first boot after the
-  // upgrade, so setup() restores the configured default in that case.
-  uint8_t reserved[8];
+  // HUB_SETTLE_TIME takes, then by the four HUB_STARTUP_GRACE takes. Keeping
+  // sizeof constant is what lets load() still succeed; the version byte is what
+  // stops it misreading the shifted fields. A field added out of here reads back
+  // as zero on the first boot after the upgrade, so setup() restores the
+  // configured default in that case.
+  uint8_t reserved[4];
 } __attribute__((packed));
 
 // What to do once the meter is definitively gone. Stopping is the safe default
@@ -342,6 +344,7 @@ class GrowattHub : public PollingComponent {
   uint32_t stalled_ms_{10000};
   uint32_t offline_ms_{20000};
   uint32_t offline_probe_ms_{60000};
+  uint32_t startup_grace_ms_{60000};
   uint8_t health_{METER_OFFLINE};
   uint32_t meter_age_ms_{0};
 

@@ -35,6 +35,7 @@ void GrowattHub::setup() {
   // configured default is kept rather than letting the feature silently
   // disable itself on the first boot after an upgrade.
   float settle_default = this->values_[HUB_SETTLE_TIME];
+  float grace_default = this->values_[HUB_STARTUP_GRACE];
 
   GrowattHubPrefs p{};
   if (this->pref_.load(&p)) {
@@ -45,6 +46,11 @@ void GrowattHub::setup() {
         this->values_[HUB_SETTLE_TIME] = settle_default;
         ESP_LOGI(TAG, "settle time not in the stored settings, using %.0f s",
                  settle_default);
+      }
+      if (this->values_[HUB_STARTUP_GRACE] <= 0) {
+        this->values_[HUB_STARTUP_GRACE] = grace_default;
+        ESP_LOGI(TAG, "startup grace not in the stored settings, using %.0f s",
+                 grace_default);
       }
       if (p.offline_action < OFF_ACTION_COUNT)
         this->offline_action_ = p.offline_action;
@@ -68,6 +74,7 @@ void GrowattHub::setup() {
   for (auto *inv : this->inverters_) {
     inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
     inv->set_offline_probe_interval(this->offline_probe_ms_);
+    inv->set_startup_grace(this->startup_grace_ms_);
   }
 
   // Both timers start now rather than at zero, which would make them due on the
@@ -123,6 +130,7 @@ void GrowattHub::apply_setting_(uint8_t field) {
     case HUB_RESTART_DELAY:     this->restart_delay_s_ = (uint16_t) lroundf(v); break;
     case HUB_VOLTAGE_SOFT_MARGIN: this->voltage_soft_margin_ = v; break;
     case HUB_SETTLE_TIME:       this->settle_ms_ = (uint32_t) (v * 1000.0f); break;
+    case HUB_STARTUP_GRACE:     this->startup_grace_ms_ = (uint32_t) (v * 1000.0f); break;
     case HUB_CAPABILITY_RATIO:
     case HUB_CAPABILITY_WINDOW:
       for (auto *inv : this->inverters_)
@@ -135,10 +143,11 @@ void GrowattHub::apply_setting_(uint8_t field) {
   // The health timeouts and the protection margin are pushed down to the
   // inverters, which hold their own copies.
   if (field == HUB_STALLED_TIMEOUT || field == HUB_OFFLINE_TIMEOUT ||
-      field == HUB_OFFLINE_PROBE) {
+      field == HUB_OFFLINE_PROBE || field == HUB_STARTUP_GRACE) {
     for (auto *inv : this->inverters_) {
       inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
       inv->set_offline_probe_interval(this->offline_probe_ms_);
+      inv->set_startup_grace(this->startup_grace_ms_);
     }
   }
 }
@@ -1417,6 +1426,8 @@ void GrowattHub::dump_config() {
                 this->values_[HUB_BATTERY_SOC_MAX]);
   ESP_LOGCONFIG(TAG, "  meter stalled after %u ms, offline after %u ms",
                 (unsigned) this->stalled_ms_, (unsigned) this->offline_ms_);
+  ESP_LOGCONFIG(TAG, "  slot startup grace: %u ms from the first request sent",
+                (unsigned) this->startup_grace_ms_);
   // The controller only acts on a hub update, so the interval it really runs
   // at is step_interval rounded up to the next multiple of update_interval.
   ESP_LOGCONFIG(TAG,

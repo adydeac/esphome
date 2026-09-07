@@ -213,7 +213,8 @@ CONF_GRID_POWER_SENSOR_ID = "grid_power_sensor_id"
     HUB_CAPABILITY_RATIO,
     HUB_CAPABILITY_WINDOW,
     HUB_SETTLE_TIME,
-) = range(29)
+    HUB_STARTUP_GRACE,
+) = range(30)
 
 CONF_REBALANCING = "phase_rebalancing"
 CONF_REBALANCE_THRESHOLD = "rebalance_threshold"
@@ -263,6 +264,11 @@ HUB_SETTINGS = {
                                "mdi:timer-alert-outline"),
     "device_offline_probe_interval": (HUB_OFFLINE_PROBE, 60, 5, 3600, 5,
                                       UNIT_SECOND, "mdi:radar"),
+    # Counted from the first request that reached the bus, not from boot, so it
+    # is a budget for the transport connect plus one identification pass rather
+    # than for everything the node does on the way up.
+    "device_startup_grace": (HUB_STARTUP_GRACE, 60, 5, 900, 5, UNIT_SECOND,
+                             "mdi:timer-play-outline"),
     "import_threshold": (HUB_IMPORT_THRESHOLD, 100, 0, 10000, 10, UNIT_WATT,
                          "mdi:transmission-tower-import"),
     "export_threshold": (HUB_EXPORT_THRESHOLD, 0, 0, 10000, 10, UNIT_WATT,
