@@ -1047,6 +1047,11 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void publish_derived_();
   void publish_settings_();
   void apply_protection_limits_();
+  /// Whether the phase/line question has an answer yet. A forced convention is
+  /// always an answer; auto has one only once a live block has been read,
+  /// because the detection works by looking at measured voltages and an
+  /// unmeasured unit looks exactly like a phase convention one.
+  bool convention_known_() const;
   // State of charge below which the inverter stops discharging by itself.
   float discharge_floor_() const;
   // Starts a run without clearing the attempt counter, so an automatic retry
@@ -1160,6 +1165,8 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // reduce output.
   bool auto_protection_{true};
   bool protection_applied_{false};
+  // One deferral notice per identification run, not one per update cycle.
+  bool protection_deferred_logged_{false};
   float tgt_phase_low_{0};
   float tgt_phase_high_{0};
   float tgt_line_low_{0};

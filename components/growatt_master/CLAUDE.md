@@ -512,6 +512,17 @@ total as unsigned turned a night time draw of -31.0 W into 429496704 W, which
 identification, so a sign error in one register silently rewrote the model's
 capacity and everything computed from it.
 
+Grid protection limits are written only from an identification that succeeded.
+An incomplete run still reaches `IDENT_DONE` - it has to, or the slot would
+never be polled again - so `step_` was never the right test; `ident_trusted()`
+is. On `CONV_AUTO` the phase/line decision is made by looking at measured
+voltages, so it also waits for a live block: a slot with nothing measured looks
+exactly like a phase convention unit, and would be written 253 V where a line
+convention unit wants 438 V. Declining to write is the safe direction - the
+inverter keeps what its installer left, which is a defensible setting where a
+guessed one is not - and `protection_applied_` is cleared on every run, so a
+later attempt that does succeed applies them with no extra bookkeeping.
+
 Meters follow the same health contract as the inverters, for the same reason. A
 meter that has gone quiet for `device_offline_timeout` drops back to
 identification rather than continuing to poll: the model and phase count decided

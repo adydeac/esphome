@@ -437,6 +437,7 @@ void GrowattInverter::begin_identification_() {
   this->ident_incomplete_ = false;
   this->ident_retry_at_ = 0;
   this->protection_applied_ = false;  // limits are re-applied on every run
+  this->protection_deferred_logged_ = false;
   this->pac_is_total_ = false;        // re-detected from the next live block
   this->pac_total_hits_ = 0;
   this->nameplate_revised_ = false;
@@ -1886,11 +1887,51 @@ void GrowattInverter::set_protection_targets(float phase_low, float phase_high,
 // Widening the inverter's own trip thresholds beyond the range the controller
 // reacts to leaves room to intervene before the hardware disconnects, which
 // would otherwise cost minutes of production while it waits to reconnect.
+bool GrowattInverter::convention_known_() const {
+  if (this->cfg_convention_ != CONV_AUTO)
+    return true;
+  for (uint8_t i = 0; i < 3; i++)
+    if (!std::isnan(this->ac_voltage_[i]))
+      return true;
+  return false;
+}
+
 void GrowattInverter::apply_protection_limits_() {
   if (!this->auto_protection_ || this->protection_applied_)
     return;
   if (this->tgt_phase_low_ <= 0 || this->tgt_phase_high_ <= 0)
     return;
+
+  // Trip thresholds are the one thing written here that the inverter acts on
+  // without us: get them wrong and the unit either disconnects from a healthy
+  // grid or rides through a sick one, and it keeps doing so after this
+  // component is gone. So they are only written from an identification that
+  // learned something, and only once the phase/line question has an answer.
+  //
+  // An incomplete run still reaches IDENT_DONE - it has to, or the slot would
+  // never be polled - so step_ alone was never the right test. And on auto
+  // convention the detection reads measured voltages, so a slot with nothing
+  // measured yet looks exactly like a phase convention unit and would be
+  // written 253 V where a line convention unit wants 438 V.
+  //
+  // Not writing is the safe direction. The inverter keeps whatever its
+  // installer or the factory left, which is a defensible setting; a guessed
+  // one is not. begin_identification_() clears protection_applied_, so a later
+  // run that does succeed applies them without anything else having to
+  // remember.
+  const char *why = nullptr;
+  if (!this->ident_trusted())
+    why = "identification did not complete";
+  else if (!this->convention_known_())
+    why = "no AC voltage measured yet";
+  if (why != nullptr) {
+    if (!this->protection_deferred_logged_) {
+      this->protection_deferred_logged_ = true;
+      ESP_LOGW(TAG, "slot %u: not writing grid protection limits, %s",
+               this->slot_index_, why);
+    }
+    return;
+  }
 
   bool line = this->reports_line_voltage();
   float low = line ? this->tgt_line_low_ : this->tgt_phase_low_;
