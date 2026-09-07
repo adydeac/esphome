@@ -406,6 +406,27 @@ because they share a bus - they may not - but because the question being asked
 is the same one, and a second set of timeouts would be two things to tune where
 one will do.
 
+Coming up is a separate question from going quiet, and it has its own window.
+`device_startup_grace` (60 s) governs a slot that has never answered, and it is
+counted from the first request the bus actually accepted rather than from boot.
+Boot is far too early a reference on `modbus_tcp`: association, DHCP and the
+hub's own connect - not retried faster than `reconnect_interval` - all happen
+before a frame can leave, and `try_send_()` will not queue one while the
+transport reports itself blocked. Measured from uptime, the last slot in the
+list was declared dead before it had been asked twice, and then sat out a full
+`device_offline_probe_interval` for a fault that was never on the wire. Until
+that first request goes out, no verdict is reached at all.
+
+The controller stays out of the way while that is happening. `refresh_all_()`
+skips slots that have not finished identifying - there is no setpoint in force
+to reassert, and identification re-applies the rate itself when it completes -
+and `controllable_()` (enabled, online, *and* identified) guards the increase
+pass, the three phase takers accounting and the rebalance trade-down. Until
+identification lands, `get_phases()` and `get_phase()` are configured defaults,
+so an unread three phase unit reads as "1p L1" and would be planned against as
+one. Reduction and protection paths are deliberately not guarded: cutting the
+wrong unit costs production, declining to cut costs a trip.
+
 Offline is not just a label. A model without storage simply shuts down when the
 panels go dark, and each pointless query then costs more bus time in timeouts
 than a whole valid cycle. So an offline inverter stops being polled and is
