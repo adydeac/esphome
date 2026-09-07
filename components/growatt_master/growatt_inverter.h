@@ -136,6 +136,26 @@ static const uint8_t REG_CAPS_CNT = 3;
 
 // Storage probe, holding 1000..1060. 1000..1007 hold battery configuration
 // with non-zero factory defaults on MIX/SPA/SPH; 1060 is BuckUpsFunEn.
+// Which register family carries the storage data. An SPH keeps it at 1000, a
+// TL-X/TL-XH at 3125 and up. The two are mutually exclusive - a unit that
+// answers the 1000 block with data has no 3000 storage block and the other way
+// round - so one enum decides every base address downstream.
+enum StorageFamily : uint8_t {
+  STORAGE_NONE = 0,
+  STORAGE_SPH,   // holding/input 1000..1096
+  STORAGE_TLXH,  // input 3125..3231, presence flagged by 3118
+};
+
+// BDC_OnOffState. 0 is no BDC, 1..3 are which BDCs are connected. This is the
+// TL-XH answer to the question holding 183..185 answers on an SPH, and on this
+// family those three read zero whatever is attached.
+static const uint16_t REG_BDC_STATE = 3118;
+static const uint8_t REG_BDC_STATE_CNT = 1;
+
+// Battery presence on a TL-XH: Vbat (0.01 V), Ibat, SOC.
+static const uint16_t XH_BAT_BASE = 3169;
+static const uint8_t XH_BAT_CNT = 3;
+
 static const uint16_t REG_STORAGE_BASE = 1000;
 static const uint8_t REG_STORAGE_CNT = 61;
 static const uint8_t REG_STORAGE_CHECK = 8;
@@ -325,7 +345,8 @@ enum IdentStep : uint8_t {
   IDENT_TYPE,      // holding 125..136  model strings
   IDENT_CAPS,      // holding 183..185
   IDENT_STORAGE,   // holding 1000..1060
-  IDENT_BATTERY,   // input 1013..1014
+  IDENT_BDC,       // input 3118, only when the 1000 block came back empty
+  IDENT_BATTERY,   // input 1013..1014, or 3169..3171 on a TL-XH
   IDENT_SETTINGS,  // holding 1070..1108, storage only
   IDENT_DONE,
 };
@@ -369,11 +390,18 @@ struct GrowattCaps {
   uint8_t strings{0};    // PV inputs actually carrying voltage
   uint8_t trackers{0};   // MPPT inputs the hardware has, from TP
   bool has_storage{false};
+  StorageFamily storage_family{STORAGE_NONE};
   bool has_ups{false};
   bool has_battery{false};
   uint16_t battery_soc{0};
   uint8_t battery_packs{0};
   uint8_t bdc_count{0};
+
+  /// Whether this slot has an EPS/UPS register block worth reading. On an SPH
+  /// it exists and 1060 says whether the output is enabled - a disabled UPS
+  /// still reports through it. A MIN TL-XH has no EPS terminal, so the block
+  /// is absent rather than disabled and reading it is a wasted round trip.
+  bool has_ups_block() const { return storage_family == STORAGE_SPH; }
   std::string inv_type;
   std::string serial;
 };

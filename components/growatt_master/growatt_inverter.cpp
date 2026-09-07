@@ -763,8 +763,14 @@ void GrowattInverter::send_step_() {
     case IDENT_STORAGE:
       ok = this->read_holding_registers(REG_STORAGE_BASE, REG_STORAGE_CNT);
       break;
+    case IDENT_BDC:
+      ok = this->read_input_registers(REG_BDC_STATE, REG_BDC_STATE_CNT);
+      break;
     case IDENT_BATTERY:
-      ok = this->read_input_registers(REG_BAT_BASE, REG_BAT_CNT);
+      if (this->caps_.storage_family == STORAGE_TLXH)
+        ok = this->read_input_registers(XH_BAT_BASE, XH_BAT_CNT);
+      else
+        ok = this->read_input_registers(REG_BAT_BASE, REG_BAT_CNT);
       break;
     case IDENT_SETTINGS:
       ok = this->read_holding_registers(HO_SETTINGS_BASE, HO_SETTINGS_CNT);
@@ -820,7 +826,12 @@ void GrowattInverter::advance_(bool ok) {
     case IDENT_INFO:    this->step_ = IDENT_TYPE; break;
     case IDENT_TYPE:    this->step_ = IDENT_CAPS; break;
     case IDENT_CAPS:    this->step_ = IDENT_STORAGE; break;
-    case IDENT_STORAGE: this->step_ = IDENT_BATTERY; break;
+    case IDENT_STORAGE:
+      // Only ask about a BDC when the 1000 block turned up nothing. A unit
+      // that answered there is an SPH and has no 3000 storage block to probe.
+      this->step_ = this->caps_.has_storage ? IDENT_BATTERY : IDENT_BDC;
+      break;
+    case IDENT_BDC:     this->step_ = IDENT_BATTERY; break;
     case IDENT_BATTERY:
       // Window and rate settings only exist on storage models.
       this->step_ = this->caps_.has_storage ? IDENT_SETTINGS : IDENT_DONE;
@@ -2181,6 +2192,14 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
       this->dump_skip_range_();
     } else if (this->poll_ != POLL_IDLE) {
       this->advance_poll_();
+    } else if (this->step_ == IDENT_BDC) {
+      // The probe asks a question a model without the 3000 block cannot even
+      // parse, so an exception here is the answer "no BDC" and not a failed
+      // identification. Marking the run incomplete would cost this slot three
+      // full identification passes for having been asked politely.
+      ESP_LOGD(TAG, "slot %u: no BDC register on this model -> grid-tie only",
+               this->slot_index_);
+      this->advance_(true);
     } else {
       this->advance_(false);
     }
@@ -2267,6 +2286,7 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
         acc |= reg16(data, i);
       this->caps_.has_storage = (acc != 0);
       if (this->caps_.has_storage) {
+        this->caps_.storage_family = STORAGE_SPH;
         this->caps_.has_ups = (reg16(data, REG_UPS_OFFSET) & 0x01) != 0;
         ESP_LOGI(TAG, "slot %u: storage YES, UPS %s", this->slot_index_,
                  this->caps_.has_ups ? "enabled" : "disabled");
@@ -2274,15 +2294,44 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
         this->publish_reg_entities_(data, REG_STORAGE_BASE, REG_STORAGE_CNT);
       } else {
         this->caps_.has_ups = false;
-        ESP_LOGI(TAG, "slot %u: no battery config data -> grid-tie only",
-                 this->slot_index_);
+        ESP_LOGD(TAG, "slot %u: no storage config at 1000, trying the BDC "
+                 "register", this->slot_index_);
+      }
+      break;
+    }
+    case IDENT_BDC: {
+      if (data.size() < REG_BDC_STATE_CNT) { this->advance_(false); return; }
+      uint16_t state = reg16(data, 0);
+      this->caps_.bdc_count = 0;
+      for (uint8_t bit = 0; bit < 2; bit++)
+        if (state & (1u << bit))
+          this->caps_.bdc_count++;
+      if (state != 0) {
+        this->caps_.has_storage = true;
+        this->caps_.storage_family = STORAGE_TLXH;
+        // A MIN TL-XH has no EPS terminal at all, so there is nothing for a
+        // 1060 style enable register to enable. The EPS block at 3145 exists
+        // in the protocol for the family but reads dead on this hardware.
+        this->caps_.has_ups = false;
+        ESP_LOGI(TAG, "slot %u: BDC connected (state 0x%02X, %u BDC) -> "
+                 "TL-XH storage", this->slot_index_, state,
+                 this->caps_.bdc_count);
+      } else {
+        ESP_LOGI(TAG, "slot %u: no storage on either register family -> "
+                 "grid-tie only", this->slot_index_);
       }
       break;
     }
     case IDENT_BATTERY: {
-      if (data.size() < REG_BAT_CNT) { this->advance_(false); return; }
-      uint16_t vbat = reg16(data, 0);
-      uint16_t soc = reg16(data, 1);
+      bool xh = this->caps_.storage_family == STORAGE_TLXH;
+      uint8_t need = xh ? XH_BAT_CNT : REG_BAT_CNT;
+      if (data.size() < need) { this->advance_(false); return; }
+      // 1013 is 0.1 V, 3169 is 0.01 V, and the SOC sits one register further
+      // along on the TL-XH because Ibat comes between. Reporting a tenth of
+      // the real pack voltage would sail straight through any sanity check,
+      // which is why the two layouts get separate reads rather than an offset.
+      uint16_t vbat = xh ? reg16(data, 0) / 10 : reg16(data, 0);
+      uint16_t soc = xh ? reg16(data, 2) : reg16(data, 1);
       this->caps_.battery_soc = soc;
       this->caps_.has_battery = (vbat > 0 || soc > 0);
       if (this->caps_.has_battery) {
