@@ -69,6 +69,14 @@ void GrowattHub::setup() {
     inv->set_health_timeouts(this->stalled_ms_, this->offline_ms_);
     inv->set_offline_probe_interval(this->offline_probe_ms_);
   }
+
+  // Both timers start now rather than at zero, which would make them due on the
+  // first tick. The first tick is the worst moment either could fire: nothing
+  // has been identified, the meter has no reading yet, and a modbus_tcp
+  // transport may still be completing its connect. Deferring them by one
+  // interval costs one control step and buys the identification pass an
+  // uncontended bus.
+  this->last_step_ = this->last_refresh_ = millis();
 }
 
 void GrowattHub::save_prefs_() {
@@ -601,10 +609,18 @@ void GrowattHub::set_all_(float pct, const char *reason) {
 // per inverter per refresh interval, and on a unit that really is gone it costs
 // the write's retries in bus time before being dropped, which is the price of
 // not silently diverging.
+// The one case the argument above does not cover is a slot that has never been
+// told anything at all. Before identification completes there is no setpoint in
+// force to diverge from, so there is nothing to reassert - and identification
+// re-applies the rate itself the moment it finishes, which is the same write
+// arriving at a better time. Issuing it here only takes bus time away from the
+// identification it is racing, and on a transport that is still connecting it
+// takes it away for the full retry budget before being dropped.
 void GrowattHub::refresh_all_() {
   for (auto *inv : this->inverters_) {
-    if (inv->is_enabled())
-      inv->apply_power_rate(inv->get_power_percent());
+    if (!inv->is_enabled() || !inv->ident_done())
+      continue;
+    inv->apply_power_rate(inv->get_power_percent());
   }
 }
 
