@@ -74,12 +74,7 @@ MID, a MOD and a MIN alike; everything in the 1070 block is SPH.
 | `ac_charge` | holding 1092 | – | yes | **no effect** |
 | Grid-first time windows | holding 1080..1088 | – | yes | **no effect** |
 | Battery-first time windows | holding 1100..1108 | – | yes | **no effect** |
-| Load-first time windows | holding 1110..1118 | – | **not read** | **no effect** |
-
-The load-first block is a second gap, and a smaller one: the SPH has it at
-1110..1118, three periods laid out exactly like the other two, but the
-identification read stops at 1108. Extending `HO_SETTINGS_CNT` from 39 to 49
-registers covers it in the same round trip - 1070..1118 is still one read.
+| Load-first time windows | holding 1110..1118 | – | yes | **no effect** |
 
 "No effect" is literal and is a known gap: identification reads the 1070 block
 on any slot with storage, including a TL-XH, which answers it with zeros rather
