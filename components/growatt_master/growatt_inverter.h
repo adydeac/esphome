@@ -298,6 +298,11 @@ static const DumpRange DUMP_RANGES[] = {
     {CMD_READ_HOLDING, 0, 125},    {CMD_READ_INPUT, 0, 125},
     {CMD_READ_HOLDING, 1000, 125}, {CMD_READ_INPUT, 1000, 125},
     {CMD_READ_HOLDING, 3000, 125}, {CMD_READ_INPUT, 3000, 125},
+    // The TL-X/TL-XH storage block starts at 3125, immediately after the range
+    // above ends - the energies at 3125, the EPS output at 3145, the BDC at
+    // 3167 and the BMS at 3196 all sit past the old boundary, which is why a
+    // unit with a working BDC dumped as if it had none.
+    {CMD_READ_HOLDING, 3125, 125}, {CMD_READ_INPUT, 3125, 125},
     // The VPP protocol is a separate Growatt document from the RTU one and
     // lives in its own address space. Two areas are worth having: 30000-30124
     // carries the reference power (30026) and the control authority flag
