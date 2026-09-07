@@ -939,12 +939,18 @@ void GrowattInverter::advance_(bool ok) {
       break;
     default: break;
   }
-  if (this->step_ == IDENT_DONE && !this->ident_incomplete_) {
+  if (this->step_ == IDENT_DONE) {
     // A unit reaching this point has either just booted or just come back from
     // an outage, and with holding 2 cleared it has forgotten register 3 either
     // way - so it is running unrestricted while we still believe our last
     // setpoint is in force. Reassert it now rather than waiting out the refresh
     // interval, which is a long time to be producing at 100 %.
+    //
+    // Whether the run learned everything it wanted is beside the point here.
+    // power_percent_ is our own state, not something read from the unit, so an
+    // unread capability register cannot make it wrong - and an incompletely
+    // identified slot is exactly the one that must not be left running free,
+    // since it is also the one the controller will not touch.
     ESP_LOGI(TAG, "slot %u: reasserting %u%% after identification",
              this->slot_index_, this->power_percent_);
     this->apply_power_rate(this->power_percent_);
