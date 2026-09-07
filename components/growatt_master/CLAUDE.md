@@ -20,10 +20,17 @@ Development hardware, at 9600 baud:
 
 | Unit | Model | DTC | Notes |
 |---|---|---|---|
-| growatt01 | MOD 40K | 5001 | three phase, 8 trackers, 4 connected |
+| growatt01 | MID 40KTL3-X | 5001 | three phase, 8 trackers, 4 connected, grid tie |
 | growatt02 | SPH 10000TL3 BH-UP | 3601 | three phase, storage, UPS |
-| growatt03 | MIN 6000TL-X | 5100 | single phase, 2 trackers |
-| grid meter | Eastron SDM630 | — | three phase |
+| growatt03 | MIN 6000TL-XH | 5100 | single phase, 2 strings, ARK pack on a BDC |
+| growatt04 | MIN 6000TL-XH | 5100 | single phase, 2 strings, ARK pack on a BDC |
+| growatt05 | MIN 6000TL-XH | 5100 | single phase, 2 strings, ARK pack on a BDC |
+| grid meter | Eastron SDM630 | — | three phase, own RS485 bus |
+| EV meter | Eastron SDM630 | — | three phase, inverter bus |
+
+All five inverters are reached over `modbus_tcp` through their WiLAN-X2
+dongles, one hub each. growatt01 powers down overnight; a slot that stops
+answering after dark is expected behaviour on it, not a fault.
 
 ## File layout
 
@@ -52,7 +59,7 @@ and several contradict it.
 ### Not every register a model has is one it will let you write
 
 A MIN answers exception 1 to a write at holding 19, the reconnect delay, that a
-MOD accepts. The register is there and reads back a sensible 30; it is the write
+MID accepts. The register is there and reads back a sensible 30; it is the write
 the firmware refuses. So "the register exists" is not a test for "the register
 is writable", any more than "it answered" is a test for "it is implemented".
 
@@ -155,7 +162,7 @@ module_capacity`, where the module count comes from pack voltage.
 
 ### The Storage family deviates from the documented map
 
-Everything below is correct on MOD and MIN units and wrong on SPH:
+Everything below is correct on MID and MIN units and wrong on SPH:
 
 | Register | Documented | On SPH |
 |---|---|---|
@@ -200,7 +207,7 @@ and there are no voltages to count.
 The SPH 10000TL3 reports its whole AC output in Pac1 and leaves Pac2 and Pac3
 at zero, while Iac2 and Iac3 carry real current — so the phases are genuinely
 working and it is only the power registers that are not what the map says. A
-MOD 40K on the same bus populates all three correctly, so this is not a
+MID 40K on the same bus populates all three correctly, so this is not a
 property of three phase units and must not be keyed off the phase count.
 
 Detection needs all three of: current present on at least two phases, power
@@ -254,7 +261,7 @@ derating 1 refuses to rise on a clear day, that is the explanation.
 
 ### Some inverters want line voltage in their protection registers
 
-MOD 40K reports 230 V phase voltages **and** 400 V line voltages, and expects
+MID 40K reports 230 V phase voltages **and** 400 V line voltages, and expects
 registers 52 and 53 written in line terms. Magnitude alone is not a safe test:
 the detection is "does it populate input 50-52 above 100 V", with a fallback to
 "a phase register reading above 300 V can only be a line voltage", and a per
@@ -511,8 +518,8 @@ identified as grid-tie. `caps_.storage_family` is decided once during
 identification and then chooses every base address, so the parsers never test
 the model. The probe at 3118 only runs when the 1000 block came back empty, and
 an exception to it means "no such register on this model" rather than a failed
-read - otherwise a MOD would burn three identification passes on a question it
-cannot parse.
+read - otherwise a grid tie unit would burn three identification passes on a
+question it cannot parse.
 
 A MIN TL-XH has no EPS terminal, so `has_ups` is false on that family and the
 EPS block at 3145 is never polled - the registers exist in the protocol but read
@@ -1083,7 +1090,7 @@ decides whether a charging SPH is correctly passed over.
 
 **Reducing when an inverter reports over voltage.** Today that case only blocks
 increases. If the setpoint is already high the unit will trip at 300 anyway,
-which is a real hole: a MOD 40K was observed sitting in fault for over an hour,
+which is a real hole: a MID 40K was observed sitting in fault for over an hour,
 and no restart cleared it - only removing the PV input, because the fault was
 never in the inverter, it was the voltage it measured. Whether to reduce there
 too, and whether that should be the offending unit alone or everything on its

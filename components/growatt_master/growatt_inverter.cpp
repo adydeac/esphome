@@ -977,7 +977,7 @@ void GrowattInverter::parse_device_info_(std::span<const uint16_t> data) {
   this->caps_.dtc = reg16(data, HO_DTC);
   this->caps_.serial = ascii_from(data, HO_SERIAL, HO_SERIAL_CNT);
 
-  // Nameplate power is documented as 0.1 VA and reads that way on MOD and MIN
+  // Nameplate power is documented as 0.1 VA and reads that way on MID and MIN
   // units, but the Storage family reports whole VA instead (an SPH 10000
   // returns 10000, not 100000). Rather than key this off a model list, the
   // value is checked for plausibility: no real inverter is rated under 500 VA.
@@ -1041,7 +1041,7 @@ void GrowattInverter::parse_device_info_(std::span<const uint16_t> data) {
   }
 
   // TP (register 44) packs the installed MPPT tracker count in the high byte
-  // and the phase count in the low byte. It is accurate on MOD and MIN units
+  // and the phase count in the low byte. It is accurate on MID and MIN units
   // but returns garbage on the Storage family, so it is filtered for
   // plausibility and only used to fill gaps: the tracker count, which no live
   // measurement can reveal, and the phase count when the inverter is off grid
@@ -1109,7 +1109,7 @@ void GrowattInverter::parse_fast_main_(std::span<const uint16_t> data) {
   // Some three phase units report the whole AC output in Pac1 and leave Pac2
   // and Pac3 at zero, while Iac2 and Iac3 carry real current - so the phases
   // are genuinely working and the power registers simply are not per phase.
-  // Detected rather than keyed off a model, because a MOD 40K populates all
+  // Detected rather than keyed off a model, because a MID 40K populates all
   // three: current on at least two phases, power on exactly the first, and
   // that first figure matching the total output.
   //
@@ -1591,7 +1591,7 @@ const char *GrowattInverter::get_derating_text() const {
 //
 // Measured on real hardware: an SPH clipping at 9-18 % extrapolated to 9600,
 // 9670, 9671 and 9689 W on four different setpoints, and two MIN units to
-// within 10 W of their 6000 W nameplate. A MOD that was PV limited throughout
+// within 10 W of their 6000 W nameplate. A MID that was PV limited throughout
 // gave 451, 647, 672, 1292 and 1325 W - which is why the ratio test has to gate
 // this, or the rolling maximum would keep the worst overestimate.
 void GrowattInverter::update_capability_() {

@@ -707,7 +707,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // meter sees by whatever the AC cabling drops. Highest of the three, since one
   // phase over the limit is enough to trip the whole unit.
   //
-  // These are two separate registers blocks and two separate questions. A MOD
+  // These are two separate registers blocks and two separate questions. A MID
   // 40K populates 38/42/46 with phase voltages AND 50-52 with line voltages at
   // the same time, so each has to be compared against its own threshold.
   // reports_line_voltage() answers a third question entirely - which convention
@@ -717,7 +717,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   float peak_line_voltage() const;
   // Whether the AC voltage registers hold line voltages rather than phase
   // ones, which decides which threshold they must be compared against. This is
-  // NOT the same question as reports_line_voltage(): a MOD 40K wants its
+  // NOT the same question as reports_line_voltage(): a MID 40K wants its
   // protection registers written in line terms while still reporting phase
   // voltages at 38/42/46, and an SPH reports line voltages there.
   bool ac_voltage_is_line() const;
@@ -1116,7 +1116,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   bool protect_eeprom_{true};
 
   // Registers this unit answered an exception to. A MIN rejects a write to the
-  // reconnect delay at holding 19 that a MOD accepts, and an exception is a
+  // reconnect delay at holding 19 that a MID accepts, and an exception is a
   // capability answer rather than a transient fault - so it is remembered, and
   // the register is not written again until the next identification. Without
   // this, every protection pass would retry the same futile write.
