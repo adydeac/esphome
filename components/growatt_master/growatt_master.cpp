@@ -654,8 +654,18 @@ void GrowattHub::refresh_all_() {
   }
 }
 
+// Every caller of this is a pass that adds output or moves it between phases:
+// the increase pass, the three phase takers accounting and the rebalance trade.
+// All of them plan against phase count, wiring and nameplate, so an
+// identification that came back incomplete disqualifies a slot here - its
+// capabilities are defaults, and a three phase unit read as single phase on L1
+// is planned against as one.
+//
+// Reductions deliberately do not go through this. They run on enabled and
+// online alone, because cutting output is safe whatever the model says, and
+// the moment the model is unreliable is the moment that matters most.
 bool GrowattHub::controllable_(GrowattInverter *inv) {
-  return inv->is_enabled() && inv->is_online() && inv->ident_done();
+  return inv->is_enabled() && inv->is_online() && inv->ident_trusted();
 }
 
 float GrowattHub::headroom_up_(GrowattInverter *inv, const float *err) {
@@ -903,6 +913,12 @@ void GrowattHub::control_power_() {
                (unsigned) i);
       continue;
     }
+    // Still listed, and still reducible: what follows is the picture the
+    // controller has of this slot, and seeing it is how a bad identification
+    // gets noticed.
+    if (inv->ident_is_incomplete())
+      ESP_LOGD(TAG, "  slot %u: identification incomplete, not raised or "
+               "rebalanced until it succeeds", (unsigned) i);
     char wiring[8];
     if (inv->get_phases() >= 3)
       snprintf(wiring, sizeof(wiring), "3p");

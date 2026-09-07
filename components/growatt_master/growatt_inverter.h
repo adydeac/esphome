@@ -623,6 +623,15 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
 
   bool is_enabled() const { return this->address_ != 0; }
   bool ident_done() const { return this->step_ == IDENT_DONE; }
+  // Identification finished and learned what it set out to learn. A run that
+  // ends incomplete still reaches IDENT_DONE - it has to, or the slot would
+  // never be polled again - but it leaves capabilities at whatever defaults or
+  // partial readings it managed, so anything that plans against phases,
+  // wiring or nameplate has to ask this instead.
+  bool ident_trusted() const {
+    return this->step_ == IDENT_DONE && !this->ident_incomplete_;
+  }
+  bool ident_is_incomplete() const { return this->ident_incomplete_; }
   const GrowattCaps &caps() const { return this->caps_; }
   uint8_t get_phases() const { return this->caps_.phases; }
   uint8_t get_strings() const { return this->caps_.strings; }
