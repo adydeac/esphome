@@ -873,6 +873,11 @@ void GrowattHub::control_power_() {
                inv->health_text());
       continue;
     }
+    if (!inv->ident_done()) {
+      ESP_LOGD(TAG, "  slot %u: identifying, excluded from control",
+               (unsigned) i);
+      continue;
+    }
     char wiring[8];
     if (inv->get_phases() >= 3)
       snprintf(wiring, sizeof(wiring), "3p");
@@ -1144,7 +1149,7 @@ void GrowattHub::control_power_() {
     // allow more, however large its nameplate.
     float takers = 0;
     for (auto *inv : this->inverters_) {
-      if (inv->is_enabled() && inv->is_online() && inv->get_phases() >= 3 &&
+      if (controllable_(inv) && inv->get_phases() >= 3 &&
           inv->can_produce_more())
         takers += inv->available_headroom();
     }
@@ -1163,7 +1168,7 @@ void GrowattHub::control_power_() {
       bool traded = false;
       for (int i = (int) this->inverters_.size() - 1; i >= 0; i--) {
         GrowattInverter *inv = this->inverters_[i];
-        if (!inv->is_enabled() || !inv->is_online())
+        if (!controllable_(inv))
           continue;
         if (inv->get_phases() >= 3 || inv->get_phase() != bind)
           continue;
@@ -1228,7 +1233,7 @@ void GrowattHub::control_power_() {
 
   for (size_t i = 0; i < this->inverters_.size(); i++) {
     GrowattInverter *inv = this->inverters_[i];
-    if (!inv->is_enabled() || !inv->is_online())
+    if (!controllable_(inv))
       continue;
     if (inv->get_power_percent() >= inv->get_max_power_rate())
       continue;

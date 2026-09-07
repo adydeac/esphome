@@ -315,6 +315,21 @@ class GrowattHub : public PollingComponent {
   // exporting. Single phase units only look at the phase they feed; three phase
   // units spread evenly, so they are bound by the worst phase and need three
   // times the correction to move one phase by a given amount.
+  /// A slot the controller may raise or trade against. Online is not enough:
+  /// until identification completes, the phase count, the phase a single phase
+  /// unit feeds and the rate ceiling are all still at their configured
+  /// defaults, so a decision taken on them is a decision about a different
+  /// inverter than the one on the wall.
+  ///
+  /// Deliberately not applied to the reduction paths. Cutting a unit whose
+  /// capabilities are still unknown may cut the wrong one, which costs
+  /// production; not cutting it because it was still identifying costs a trip
+  /// or an export breach. Reductions stay unconditional, as they are
+  /// everywhere else in this controller.
+  static bool controllable_(GrowattInverter *inv) {
+    return inv->is_enabled() && inv->is_online() && inv->ident_done();
+  }
+
   float headroom_up_(GrowattInverter *inv, const float *err);
   // How much this inverter must shed to clear the export on one specific
   // phase. Targeting the phase being fixed avoids over-correcting when several
