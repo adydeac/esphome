@@ -1026,10 +1026,9 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void parse_settings_(std::span<const uint16_t> data);
   void parse_settings_xh_(std::span<const uint16_t> data);
   // Where a setting lives on this slot's family, 0 when it has no such
-  // register, and whether its storage block may be written at all.
+  // register.
   uint16_t setting_addr_(uint8_t field) const;
   uint16_t ac_charge_addr_() const;
-  bool settings_writable_() const;
   void publish_derived_();
   void publish_settings_();
   void apply_protection_limits_();

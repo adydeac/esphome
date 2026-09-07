@@ -1943,31 +1943,11 @@ uint16_t GrowattInverter::ac_charge_addr_() const {
                                                     : HO_BF_AC_CHARGE;
 }
 
-// Nothing in the TL-XH storage block has been written on hardware yet, and this
-// is the one family where a refused write does not look like one: the firmware
-// answers a change it will not make with an acknowledgement. Reading the block
-// is what this change is for; writing it waits for a bench test that can tell
-// an accepted write from an applied one. One predicate rather than a check at
-// each call site, so removing the gate is one line.
-bool GrowattInverter::settings_writable_() const {
-  if (this->caps_.storage_family != STORAGE_TLXH)
-    return true;
-  ESP_LOGW(TAG,
-           "slot %u: the TL-XH settings block is read only until its writes "
-           "have been verified on hardware",
-           this->slot_index_);
-  return false;
-}
-
 void GrowattInverter::set_setting(uint8_t field, float value) {
   if (field >= SET_COUNT)
     return;
   uint16_t addr = this->setting_addr_(field);
   if (addr == 0)
-    return;
-  // Only the storage settings moved; the first holding group is the same
-  // register on every family and stays writable.
-  if (addr >= XH_SETTINGS_BASE && !this->settings_writable_())
     return;
   uint16_t raw = (uint16_t) lroundf(value / SETTING_SCALE[field]);
   this->settings_[field] = raw;
@@ -2027,8 +2007,6 @@ void GrowattInverter::set_register_switch(uint16_t address, uint16_t on_value,
 }
 
 void GrowattInverter::set_ac_charge(bool on) {
-  if (!this->settings_writable_())
-    return;
   this->ac_charge_ = on;
   uint16_t v = on ? 1 : 0;
   this->queue_write_(CMD_WRITE_SINGLE, this->ac_charge_addr_(), &v, 1);
@@ -2151,10 +2129,14 @@ bool GrowattInverter::apply_windows(uint8_t mode) {
   }
 
   if (this->caps_.storage_family == STORAGE_TLXH) {
-    // The pair is written with one 0x10 and the flags composed into the start
-    // word; none of that is exercised yet, and a half written window is a
-    // schedule nobody asked for.
-    ESP_LOGW(TAG, "slot %u: TL-XH window writing is not implemented yet",
+    // Not caution - absence. What follows composes three registers per period
+    // and writes nine of them from one base, which is the SPH layout. This
+    // family has two registers per window, the flags inside the start word, and
+    // nine windows that are not contiguous: 3038..3045, then 3050..3059 with
+    // the battery first parameters in between. Writing the SPH shape here would
+    // land a schedule on top of 3046 and 3047. The layout is known and the
+    // write belongs in its own change.
+    ESP_LOGW(TAG, "slot %u: writing TL-XH windows is not implemented yet",
              this->slot_index_);
     return false;
   }

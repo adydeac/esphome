@@ -67,22 +67,33 @@ MID, a MOD and a MIN alike; everything in the 1070 block is SPH.
 | `grid_v_low` / `grid_v_high` | holding 52 / 53 | yes | yes | yes |
 | `grid_f_low` / `grid_f_high` | holding 54 / 55 | yes | yes | yes |
 | `export_limit_rate` | holding 123 | yes | yes | yes |
-| `grid_first_discharge_rate` | holding 1070 / 3036 | – | yes | read only |
-| `grid_first_stop_soc` | holding 1071 / 3037 | – | yes | read only |
-| `battery_first_charge_rate` | holding 1090 / 3047 | – | yes | read only |
-| `battery_first_stop_soc` | holding 1091 / 3048 | – | yes | read only |
-| `ac_charge` | holding 1092 / 3049 | – | yes | read only |
-| Grid-first time windows | holding 1080..1088 / 3038, 3040, 3042 | – | yes | read only |
-| Battery-first time windows | holding 1100..1108 / 3044, 3050, 3052 | – | yes | read only |
-| Load-first time windows | holding 1110..1118 / 3054, 3056, 3058 | – | yes | read only |
+| `grid_first_discharge_rate` | holding 1070 / 3036 | – | yes | yes |
+| `grid_first_stop_soc` | holding 1071 / 3037 | – | yes | yes |
+| `battery_first_charge_rate` | holding 1090 / 3047 | – | yes | yes |
+| `battery_first_stop_soc` | holding 1091 / 3048 | – | yes | yes |
+| `ac_charge` | holding 1092 / 3049 | – | yes | yes |
+| Grid-first time windows | holding 1080..1088 / 3038, 3040, 3042 | – | yes | read, write not implemented |
+| Battery-first time windows | holding 1100..1108 / 3044, 3050, 3052 | – | yes | read, write not implemented |
+| Load-first time windows | holding 1110..1118 / 3054, 3056, 3058 | – | yes | read, write not implemented |
 
-"Read only" means the entity shows what the register says and refuses to write
-it. Identification used to read the 1070 block on any slot with storage,
-including a TL-XH, which answers it with zeros rather than an exception, so the
-entities existed, read back as zero and accepted writes that went nowhere. They
-now read the family's own block. Writing it waits for a bench test: this is the
-one family where a refused change is acknowledged rather than refused, so an
-accepted write is not evidence of an applied one.
+Identification used to read the 1070 block on any slot with storage, including a
+TL-XH, which answers it with zeros rather than an exception, so the entities
+existed, read back as zero and accepted writes that went nowhere. They now read
+and write the family's own block. The rates, stop SOCs and AC charge are plain
+values at a different address and are treated exactly as the SPH ones are - the
+same trust, since the same doubt applies to both.
+
+The windows are not written, and that is absence rather than caution: the write
+path composes three registers per period and sends nine from one base, which is
+the SPH layout. This family has two registers per window, the flags inside the
+start word, and nine windows that are not contiguous, so writing the SPH shape
+would land a schedule on top of 3046 and 3047. The layout is known; the write
+belongs in its own change.
+
+Whether the addresses are right at all is answered by looking, not by refusing:
+after identification the read back values should match what ShinePhone shows for
+the same unit. If they do, the block is mapped correctly and writing it is as
+safe as writing the SPH equivalent.
 
 ### The TL-XH storage settings block
 
