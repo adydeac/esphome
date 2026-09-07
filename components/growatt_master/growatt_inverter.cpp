@@ -2038,10 +2038,12 @@ void GrowattInverter::write_register(uint16_t address, uint16_t value) {
   this->queue_write_(CMD_WRITE_SINGLE, address, &value, 1);
 }
 
-void GrowattInverter::set_register_select(uint16_t address, select::Select *s) {
+void GrowattInverter::set_register_select(uint16_t address, uint16_t xh_address,
+                                          select::Select *s) {
   if (this->reg_select_count_ >= MAX_REG_SELECTS)
     return;
   this->reg_select_addr_[this->reg_select_count_] = address;
+  this->reg_select_xh_addr_[this->reg_select_count_] = xh_address;
   this->reg_select_[this->reg_select_count_] = s;
   this->reg_select_count_++;
 }
@@ -2049,7 +2051,8 @@ void GrowattInverter::set_register_select(uint16_t address, select::Select *s) {
 void GrowattInverter::publish_reg_entities_(std::span<const uint16_t> data,
                                             uint16_t base, uint16_t count) {
   for (uint8_t i = 0; i < this->reg_select_count_; i++) {
-    uint16_t a = this->reg_select_addr_[i];
+    uint16_t a = this->family_addr(this->reg_select_addr_[i],
+                                   this->reg_select_xh_addr_[i]);
     if (a >= base && a < base + count && this->reg_select_[i] != nullptr) {
       auto opt = this->reg_select_[i]->at(reg16(data, a - base));
       if (opt.has_value())

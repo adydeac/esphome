@@ -297,7 +297,12 @@ const char *window_mode_text(uint8_t mode);
 // SOCs are the same values the SPH keeps at 1070 and 1090; the windows are not
 // the same shape at all - see below.
 static const uint16_t XH_SETTINGS_BASE = 3036;
-static const uint8_t XH_SETTINGS_CNT = 24;      // 3036..3059
+// 3036..3070. The settings and the nine windows end at 3059; the read runs on
+// to the battery type at 3070 because it is one register in a block already
+// being fetched, and a second read for it would cost a round trip on the one
+// resource that is scarce.
+static const uint8_t XH_SETTINGS_CNT = 35;
+static const uint16_t XH_BATTERY_TYPE = 3070;
 static const uint16_t XH_GF_DISCHARGE_RATE = 3036;
 static const uint16_t XH_GF_STOP_SOC = 3037;
 static const uint16_t XH_BF_CHARGE_RATE = 3047;
@@ -593,7 +598,19 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // Writes a single holding register directly, used by the register backed
   // selects (battery type, export limit mode).
   void write_register(uint16_t address, uint16_t value);
-  void set_register_select(uint16_t address, select::Select *s);
+  // A register backed select carries two addresses because the same setting
+  // does not live at the same place on both storage families. Pass 0 for the
+  // second when it does.
+  void set_register_select(uint16_t address, uint16_t xh_address,
+                           select::Select *s);
+  // Which of a pair of addresses this slot's family uses. Public because the
+  // select entities have to resolve their own write target, and only the
+  // component knows the family.
+  uint16_t family_addr(uint16_t address, uint16_t xh_address) const {
+    return (xh_address != 0 && this->caps_.storage_family == STORAGE_TLXH)
+               ? xh_address
+               : address;
+  }
   void set_register_switch(uint16_t address, uint16_t on_value,
                            switch_::Switch *s);
   // When set, the component clears holding 2 at identification. With setting
@@ -1186,6 +1203,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // register backed selects, looked up by holding address
   static const uint8_t MAX_REG_SELECTS = 4;
   uint16_t reg_select_addr_[MAX_REG_SELECTS]{};
+  uint16_t reg_select_xh_addr_[MAX_REG_SELECTS]{};
   select::Select *reg_select_[MAX_REG_SELECTS]{};
   uint8_t reg_select_count_{0};
   select::Select *phase_select_{nullptr};
@@ -1505,17 +1523,26 @@ class GrowattPhaseSelect : public select::Select {
 class GrowattRegisterSelect : public select::Select {
  public:
   void set_parent(GrowattInverter *p) { this->parent_ = p; }
-  void set_address(uint16_t a) { this->address_ = a; }
+  // The second address is the one this setting has on a TL-XH, or 0 when the
+  // families agree. Resolved at write time rather than at setup, because the
+  // family is not known until identification has run.
+  void set_address(uint16_t a, uint16_t xh = 0) {
+    this->address_ = a;
+    this->xh_address_ = xh;
+  }
 
  protected:
   void control(const std::string &value) override {
     this->publish_state(value);
     auto idx = this->index_of(value);
     if (idx.has_value() && this->parent_ != nullptr)
-      this->parent_->write_register(this->address_, (uint16_t) idx.value());
+      this->parent_->write_register(
+          this->parent_->family_addr(this->address_, this->xh_address_),
+          (uint16_t) idx.value());
   }
   GrowattInverter *parent_{nullptr};
   uint16_t address_{0};
+  uint16_t xh_address_{0};
 };
 
 // Switch whose two states are two values written to one holding register.

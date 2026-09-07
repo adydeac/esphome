@@ -116,7 +116,7 @@ none of it is written yet.
 | holding 3047 | battery-first charge power rate | 1090 |
 | holding 3048 | battery-first stop SOC | 1091 |
 | holding 3049 | AC charge enable | 1092 |
-| holding 3070 | battery type - 0 lithium, 1 lead acid, 2 other | none |
+| holding 3070 | battery type - 0 lithium, 1 lead acid, 2 other | 1048 |
 | input 3144 | priority: load first, battery first, grid first | input 1000 work mode |
 
 #### Time window encoding, and why it is not the SPH shape
@@ -178,13 +178,17 @@ restoring its state into a live register. The reading here is: publish what the
 register says, warn once when an enabled window's priority does not match its
 slot, and correct it only when that window is next written.
 
-#### Two registers to read and not write
+#### One register to read and not write
 
 `bWorkMode` at 3018 is not the priority and is not a control lever: it selects
 what the inverter is in the installation - standalone, retrofit, one of several
 in parallel. Reading it is diagnostics; writing it reconfigures the unit's role.
-Battery type at 3070 is the same shape of setting. Both belong on the read side
-of any change that touches this block.
+Nothing reads or writes it today.
+
+Battery type is the exception in that group: it is the same setting the SPH
+keeps at 1048, it is already a select entity, and it is now resolved per family
+rather than written to the SPH address on every model. The settings read runs to
+3070 to cover it.
 
 "Rejected" means the inverter answered the write with Modbus exception 1. The
 component records the address and stops writing it until the next

@@ -354,9 +354,11 @@ MODE_GRID_FIRST, MODE_BATTERY_FIRST, MODE_LOAD_FIRST = 0, 1, 2
     SET_EXPORT_LIMIT_RATE,
 ) = range(13)
 
-# Holding addresses written directly by the register backed selects
-ADDR_BATTERY_TYPE = 1048
-ADDR_EXPORT_LIMIT = 122
+# Holding addresses written directly by the register backed selects. The second
+# entry is the address on a TL-XH, or 0 where both families agree - the export
+# limit is in the first holding group, which is common to every model.
+ADDR_BATTERY_TYPE, ADDR_BATTERY_TYPE_XH = 1048, 3070
+ADDR_EXPORT_LIMIT, ADDR_EXPORT_LIMIT_XH = 122, 0
 
 CONF_GRID_FIRST = "grid_first"
 CONF_BATTERY_FIRST = "battery_first"
@@ -1299,15 +1301,17 @@ async def to_code(config):
             cg.add(sel.set_parent(inv))
             cg.add(inv.set_phase_select(sel))
 
-        for key, addr, options in (
-            (CONF_BATTERY_TYPE_SELECT, ADDR_BATTERY_TYPE, BATTERY_TYPE_OPTIONS),
-            (CONF_EXPORT_LIMIT_SELECT, ADDR_EXPORT_LIMIT, EXPORT_LIMIT_OPTIONS),
+        for key, addr, xh_addr, options in (
+            (CONF_BATTERY_TYPE_SELECT, ADDR_BATTERY_TYPE,
+             ADDR_BATTERY_TYPE_XH, BATTERY_TYPE_OPTIONS),
+            (CONF_EXPORT_LIMIT_SELECT, ADDR_EXPORT_LIMIT,
+             ADDR_EXPORT_LIMIT_XH, EXPORT_LIMIT_OPTIONS),
         ):
             if key in conf:
                 sel = await select.new_select(conf[key], options=options)
                 cg.add(sel.set_parent(inv))
-                cg.add(sel.set_address(addr))
-                cg.add(inv.set_register_select(addr, sel))
+                cg.add(sel.set_address(addr, xh_addr))
+                cg.add(inv.set_register_select(addr, xh_addr, sel))
 
         if CONF_AC_CHARGE in conf:
             sw = await switch.new_switch(conf[CONF_AC_CHARGE])
