@@ -72,9 +72,9 @@ MID, a MOD and a MIN alike; everything in the 1070 block is SPH.
 | `battery_first_charge_rate` | holding 1090 / 3047 | – | yes | yes |
 | `battery_first_stop_soc` | holding 1091 / 3048 | – | yes | yes |
 | `ac_charge` | holding 1092 / 3049 | – | yes | yes |
-| Grid-first time windows | holding 1080..1088 / 3038, 3040, 3042 | – | yes | read, write not implemented |
-| Battery-first time windows | holding 1100..1108 / 3044, 3050, 3052 | – | yes | read, write not implemented |
-| Load-first time windows | holding 1110..1118 / 3054, 3056, 3058 | – | yes | read, write not implemented |
+| Grid-first time windows | holding 1080..1088 / 3038, 3040, 3042 | – | yes | yes |
+| Battery-first time windows | holding 1100..1108 / 3044, 3050, 3052 | – | yes | yes |
+| Load-first time windows | holding 1110..1118 / 3054, 3056, 3058 | – | yes | yes |
 
 Identification used to read the 1070 block on any slot with storage, including a
 TL-XH, which answers it with zeros rather than an exception, so the entities
@@ -83,12 +83,17 @@ and write the family's own block. The rates, stop SOCs and AC charge are plain
 values at a different address and are treated exactly as the SPH ones are - the
 same trust, since the same doubt applies to both.
 
-The windows are not written, and that is absence rather than caution: the write
-path composes three registers per period and sends nine from one base, which is
-the SPH layout. This family has two registers per window, the flags inside the
-start word, and nine windows that are not contiguous, so writing the SPH shape
-would land a schedule on top of 3046 and 3047. The layout is known; the write
-belongs in its own change.
+The windows are written a pair at a time, because the nine are not contiguous
+and there is no block to send in one frame the way the SPH blocks are sent.
+Applying one mode is three writes of two registers, each a single 0x10: start
+and stop have to change together, or the window spends a frame as a new start
+against an old stop and the inverter acts on it.
+
+Applying a mode is also the one moment the period convention is allowed to
+correct the register. The flags share the word with the start time, so a write
+composes them rather than preserving them, and the priority it writes is the one
+the period stands for. Windows nobody applies keep whatever ShinePhone put in
+them.
 
 Whether the addresses are right at all is answered by looking, not by refusing:
 after identification the read back values should match what ShinePhone shows for

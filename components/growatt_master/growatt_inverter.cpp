@@ -2128,25 +2128,15 @@ bool GrowattInverter::apply_windows(uint8_t mode) {
     return false;
   }
 
-  if (this->caps_.storage_family == STORAGE_TLXH) {
-    // Not caution - absence. What follows composes three registers per period
-    // and writes nine of them from one base, which is the SPH layout. This
-    // family has two registers per window, the flags inside the start word, and
-    // nine windows that are not contiguous: 3038..3045, then 3050..3059 with
-    // the battery first parameters in between. Writing the SPH shape here would
-    // land a schedule on top of 3046 and 3047. The layout is known and the
-    // write belongs in its own change.
-    ESP_LOGW(TAG, "slot %u: writing TL-XH windows is not implemented yet",
-             this->slot_index_);
-    return false;
-  }
-
   std::string reason;
   if (this->windows_overlap(&reason)) {
     ESP_LOGE(TAG, "slot %u: refusing to write, %s", this->slot_index_,
              reason.c_str());
     return false;
   }
+
+  if (this->caps_.storage_family == STORAGE_TLXH)
+    return this->apply_windows_xh_(mode);
 
   uint16_t regs[WINDOW_REGS];
   for (uint8_t p = 0; p < PERIOD_COUNT; p++) {
@@ -2164,6 +2154,54 @@ bool GrowattInverter::apply_windows(uint8_t mode) {
   ESP_LOGI(TAG, "slot %u: applying %s windows to %u", this->slot_index_,
            window_mode_text(mode), base);
   return this->queue_write_(CMD_WRITE_MULTI, base, regs, WINDOW_REGS);
+}
+
+// Three periods of one mode, three separate writes: the nine windows are not
+// contiguous - 3038..3045, then 3050..3059 with the battery first parameters
+// between them - so there is no block to send in one frame the way the SPH
+// blocks are sent. Two registers each, which fits the queue three times over.
+//
+// Each pair goes as one 0x10 rather than two 0x06. Start and stop have to
+// change together: sending them separately leaves the window as a new start
+// against an old stop for as long as the second frame takes, and a schedule
+// nobody asked for is a schedule the inverter will act on.
+bool GrowattInverter::apply_windows_xh_(uint8_t mode) {
+  uint8_t prio = xh_priority_for_mode(mode);
+  bool all = true;
+  for (uint8_t p = 0; p < PERIOD_COUNT; p++) {
+    TimeWindow &w = this->windows_[mode][p];
+    uint16_t base = xh_window_base(mode, p);
+    uint16_t regs[2];
+    // The flags share the word with the start time, so they are composed here
+    // rather than preserved: this is the one moment the convention is allowed
+    // to correct what the register says, because the operator is writing this
+    // window. Anything else about it is left as it was found.
+    regs[0] = (uint16_t) (((w.enabled ? XH_WIN_ENABLED : 0) |
+                           ((prio & XH_WIN_PRIORITY_MASK)
+                            << XH_WIN_PRIORITY_SHIFT) |
+                           ((w.start_h & XH_WIN_HOUR_MASK)
+                            << XH_WIN_HOUR_SHIFT) |
+                           (w.start_m & XH_WIN_MINUTE_MASK)));
+    // Bits 13..15 of the stop word are reserved and go out clear.
+    regs[1] = (uint16_t) (((w.stop_h & XH_WIN_HOUR_MASK) << XH_WIN_HOUR_SHIFT) |
+                          (w.stop_m & XH_WIN_MINUTE_MASK));
+    if (w.priority != prio)
+      ESP_LOGI(TAG, "slot %u: window %u was %s, writing it as %s",
+               this->slot_index_, mode * PERIOD_COUNT + p + 1,
+               xh_priority_text(w.priority), xh_priority_text(prio));
+    ESP_LOGI(TAG, "slot %u: %s period %u -> %u: %02u:%02u-%02u:%02u %s",
+             this->slot_index_, window_mode_text(mode), p + 1, base, w.start_h,
+             w.start_m, w.stop_h, w.stop_m, w.enabled ? "enabled" : "off");
+    if (!this->queue_write_(CMD_WRITE_MULTI, base, regs, 2)) {
+      all = false;
+      continue;
+    }
+    // Only once the frame is queued: a dropped write leaves the register as it
+    // was, and our copy has to say the same or the next read back looks like
+    // the inverter changed its mind.
+    w.priority = prio;
+  }
+  return all;
 }
 
 void GrowattInverter::set_window_number(uint8_t mode, uint8_t period,

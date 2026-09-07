@@ -1023,6 +1023,7 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void parse_fast_ups_(std::span<const uint16_t> data);
   void parse_device_info_(std::span<const uint16_t> data);
   void parse_storage_(std::span<const uint16_t> data);
+  bool apply_windows_xh_(uint8_t mode);
   void parse_settings_(std::span<const uint16_t> data);
   void parse_settings_xh_(std::span<const uint16_t> data);
   // Where a setting lives on this slot's family, 0 when it has no such

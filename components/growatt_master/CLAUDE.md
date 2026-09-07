@@ -142,7 +142,9 @@ priority - so it has one obligation attached: never enforce it on read.
 ShinePhone can and does write a different arrangement, and rewriting it at
 identification is the same mistake as a switch restoring its state into a live
 register. Publish what is there, warn once when an enabled window disagrees with
-its slot, correct it when that window is next written.
+its slot, correct it when that window is next written - which is what applying a
+mode does, since the flags share a word with the start time and a write has to
+compose them either way.
 
 Two write rules are not optional. The hour needs masking with 0x1F or the flags
 read as part of it - an enabled 07:35 grid-first window returns 135 hours to the
