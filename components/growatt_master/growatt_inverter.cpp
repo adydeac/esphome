@@ -176,6 +176,28 @@ static const char *derating_text(uint8_t m) {
   }
 }
 
+// A window block per mode, three registers to a period. Zero for a mode this
+// family does not have, which is not a case today - all three blocks exist on
+// an SPH - but is one the moment a family without load first appears, and the
+// callers have to be able to say so either way.
+uint16_t sph_window_base(uint8_t mode) {
+  switch (mode) {
+    case MODE_GRID_FIRST: return HO_GF_WINDOW_BASE;
+    case MODE_BATTERY_FIRST: return HO_BF_WINDOW_BASE;
+    case MODE_LOAD_FIRST: return HO_LF_WINDOW_BASE;
+    default: return 0;
+  }
+}
+
+const char *window_mode_text(uint8_t mode) {
+  switch (mode) {
+    case MODE_GRID_FIRST: return "grid first";
+    case MODE_BATTERY_FIRST: return "battery first";
+    case MODE_LOAD_FIRST: return "load first";
+    default: return "unknown";
+  }
+}
+
 // ============================ GrowattInverter ============================
 
 void GrowattInverter::setup() {
@@ -1979,29 +2001,33 @@ static bool window_pair_overlaps(const TimeWindow &a, const TimeWindow &b) {
   return false;
 }
 
-// The firmware rejects an enabled Grid First period that overlaps an enabled
-// Battery First period. Catching it here gives a readable message instead of a
-// bare Modbus exception.
+// The firmware rejects an enabled period that overlaps an enabled period of a
+// different mode. Catching it here gives a readable message instead of a bare
+// Modbus exception. Two periods of the same mode overlapping is the operator's
+// business, not ours: the result is one longer period.
 bool GrowattInverter::windows_overlap(std::string *reason) const {
-  for (uint8_t g = 0; g < PERIOD_COUNT; g++) {
-    const TimeWindow &gw = this->windows_[MODE_GRID_FIRST][g];
-    if (!gw.enabled)
-      continue;
-    for (uint8_t b = 0; b < PERIOD_COUNT; b++) {
-      const TimeWindow &bw = this->windows_[MODE_BATTERY_FIRST][b];
-      if (!bw.enabled)
+  for (uint8_t ma = 0; ma < MODE_COUNT; ma++) {
+    for (uint8_t pa = 0; pa < PERIOD_COUNT; pa++) {
+      const TimeWindow &a = this->windows_[ma][pa];
+      if (!a.enabled)
         continue;
-      if (window_pair_overlaps(gw, bw)) {
-        if (reason != nullptr) {
-          char buf[96];
-          snprintf(buf, sizeof(buf),
-                   "grid first period %u (%02u:%02u-%02u:%02u) overlaps "
-                   "battery first period %u (%02u:%02u-%02u:%02u)",
-                   g + 1, gw.start_h, gw.start_m, gw.stop_h, gw.stop_m, b + 1,
-                   bw.start_h, bw.start_m, bw.stop_h, bw.stop_m);
-          *reason = buf;
+      for (uint8_t mb = ma + 1; mb < MODE_COUNT; mb++) {
+        for (uint8_t pb = 0; pb < PERIOD_COUNT; pb++) {
+          const TimeWindow &b = this->windows_[mb][pb];
+          if (!b.enabled || !window_pair_overlaps(a, b))
+            continue;
+          if (reason != nullptr) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "%s period %u (%02u:%02u-%02u:%02u) overlaps "
+                     "%s period %u (%02u:%02u-%02u:%02u)",
+                     window_mode_text(ma), pa + 1, a.start_h, a.start_m,
+                     a.stop_h, a.stop_m, window_mode_text(mb), pb + 1,
+                     b.start_h, b.start_m, b.stop_h, b.stop_m);
+            *reason = buf;
+          }
+          return true;
         }
-        return true;
       }
     }
   }
@@ -2031,11 +2057,14 @@ bool GrowattInverter::apply_windows(uint8_t mode) {
     regs[p * 3 + 1] = ((uint16_t) w.stop_h << 8) | w.stop_m;
     regs[p * 3 + 2] = w.enabled ? 1 : 0;
   }
-  uint16_t base = (mode == MODE_GRID_FIRST) ? HO_GF_WINDOW_BASE
-                                            : HO_BF_WINDOW_BASE;
-  ESP_LOGI(TAG, "slot %u: applying %s windows to %u",
-           this->slot_index_,
-           mode == MODE_GRID_FIRST ? "grid first" : "battery first", base);
+  uint16_t base = sph_window_base(mode);
+  if (base == 0) {
+    ESP_LOGW(TAG, "slot %u: no %s window block on this model", this->slot_index_,
+             window_mode_text(mode));
+    return false;
+  }
+  ESP_LOGI(TAG, "slot %u: applying %s windows to %u", this->slot_index_,
+           window_mode_text(mode), base);
   return this->queue_write_(CMD_WRITE_MULTI, base, regs, WINDOW_REGS);
 }
 
@@ -2067,16 +2096,21 @@ void GrowattInverter::parse_settings_(std::span<const uint16_t> data) {
   this->publish_reg_entities_(data, HO_SETTINGS_BASE, HO_SETTINGS_CNT);
 
   for (uint8_t m = 0; m < MODE_COUNT; m++) {
-    uint16_t base = (m == MODE_GRID_FIRST) ? HO_GF_WINDOW_BASE
-                                           : HO_BF_WINDOW_BASE;
-    size_t off = base - 1070;
+    uint16_t base = sph_window_base(m);
+    if (base == 0)
+      continue;
+    size_t off = base - HO_SETTINGS_BASE;
     for (uint8_t p = 0; p < PERIOD_COUNT; p++) {
       uint16_t start = reg16(data, off + p * 3 + 0);
       uint16_t stop = reg16(data, off + p * 3 + 1);
       TimeWindow &w = this->windows_[m][p];
-      w.start_h = start >> 8;
+      // The hour is five bits, not eight. It reads the same on this family,
+      // whose top three bits are clear, and on a TL-XH, which keeps the enable
+      // and the priority up there - so the mask belongs in the shared parser
+      // rather than in whichever one is written second.
+      w.start_h = (start >> 8) & 0x1F;
       w.start_m = start & 0xFF;
-      w.stop_h = stop >> 8;
+      w.stop_h = (stop >> 8) & 0x1F;
       w.stop_m = stop & 0xFF;
       w.enabled = reg16(data, off + p * 3 + 2) != 0;
     }

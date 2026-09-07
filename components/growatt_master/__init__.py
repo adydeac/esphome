@@ -337,7 +337,7 @@ AUTO = -1
 KIND_VOLTAGE, KIND_CURRENT, KIND_POWER = 0, 1, 2
 
 # Must match the enums in growatt_inverter.h
-MODE_GRID_FIRST, MODE_BATTERY_FIRST = 0, 1
+MODE_GRID_FIRST, MODE_BATTERY_FIRST, MODE_LOAD_FIRST = 0, 1, 2
 (
     SET_ACTIVE_POWER_RATE,
     SET_GF_DISCHARGE_RATE,
@@ -360,6 +360,7 @@ ADDR_EXPORT_LIMIT = 122
 
 CONF_GRID_FIRST = "grid_first"
 CONF_BATTERY_FIRST = "battery_first"
+CONF_LOAD_FIRST = "load_first"
 CONF_AC_CHARGE = "ac_charge"
 CONF_APPLY = "apply"
 CONF_ENABLED = "enabled"
@@ -729,6 +730,7 @@ def _inverter_schema():
         ),
         cv.Optional(CONF_GRID_FIRST): _window_schema(),
         cv.Optional(CONF_BATTERY_FIRST): _window_schema(),
+        cv.Optional(CONF_LOAD_FIRST): _window_schema(),
         cv.Optional(CONF_REFRESH): button.button_schema(
             GrowattRefreshButton, icon="mdi:refresh"
         ),
@@ -1321,6 +1323,7 @@ async def to_code(config):
 
         await _setup_windows(inv, conf, CONF_GRID_FIRST, MODE_GRID_FIRST)
         await _setup_windows(inv, conf, CONF_BATTERY_FIRST, MODE_BATTERY_FIRST)
+        await _setup_windows(inv, conf, CONF_LOAD_FIRST, MODE_LOAD_FIRST)
 
         if CONF_REFRESH in conf:
             btn = await button.new_button(conf[CONF_REFRESH])

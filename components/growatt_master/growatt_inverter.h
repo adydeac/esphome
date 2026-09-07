@@ -273,17 +273,25 @@ static const uint16_t HO_BF_AC_CHARGE = 1092;
 // Times are encoded as (hour << 8) | minute and may wrap past midnight.
 static const uint16_t HO_GF_WINDOW_BASE = 1080;
 static const uint16_t HO_BF_WINDOW_BASE = 1100;
+static const uint16_t HO_LF_WINDOW_BASE = 1110;
 static const uint8_t PERIOD_COUNT = 3;
 static const uint8_t WINDOW_REGS = 9;  // 3 periods x (start, stop, enable)
-// Settings and both window blocks in one read: 1070..1108
+// Settings and all three window blocks in one read: 1070..1118. The read used
+// to stop at 1108, which was not a decision - the load first block simply was
+// not known to be there.
 static const uint16_t HO_SETTINGS_BASE = 1070;
-static const uint8_t HO_SETTINGS_CNT = 39;
+static const uint8_t HO_SETTINGS_CNT = 49;
 
 enum WindowMode : uint8_t {
   MODE_GRID_FIRST = 0,
   MODE_BATTERY_FIRST = 1,
-  MODE_COUNT = 2,
+  MODE_LOAD_FIRST = 2,
+  MODE_COUNT = 3,
 };
+
+// Base address of one window block, or 0 for a mode this family does not have.
+uint16_t sph_window_base(uint8_t mode);
+const char *window_mode_text(uint8_t mode);
 
 // Parts of a time window addressable from the UI
 enum WindowPart : uint8_t {
