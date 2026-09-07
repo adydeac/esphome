@@ -67,26 +67,27 @@ MID, a MOD and a MIN alike; everything in the 1070 block is SPH.
 | `grid_v_low` / `grid_v_high` | holding 52 / 53 | yes | yes | yes |
 | `grid_f_low` / `grid_f_high` | holding 54 / 55 | yes | yes | yes |
 | `export_limit_rate` | holding 123 | yes | yes | yes |
-| `grid_first_discharge_rate` | holding 1070 | – | yes | **no effect** |
-| `grid_first_stop_soc` | holding 1071 | – | yes | **no effect** |
-| `battery_first_charge_rate` | holding 1090 | – | yes | **no effect** |
-| `battery_first_stop_soc` | holding 1091 | – | yes | **no effect** |
-| `ac_charge` | holding 1092 | – | yes | **no effect** |
-| Grid-first time windows | holding 1080..1088 | – | yes | **no effect** |
-| Battery-first time windows | holding 1100..1108 | – | yes | **no effect** |
-| Load-first time windows | holding 1110..1118 | – | yes | **no effect** |
+| `grid_first_discharge_rate` | holding 1070 / 3036 | – | yes | read only |
+| `grid_first_stop_soc` | holding 1071 / 3037 | – | yes | read only |
+| `battery_first_charge_rate` | holding 1090 / 3047 | – | yes | read only |
+| `battery_first_stop_soc` | holding 1091 / 3048 | – | yes | read only |
+| `ac_charge` | holding 1092 / 3049 | – | yes | read only |
+| Grid-first time windows | holding 1080..1088 / 3038, 3040, 3042 | – | yes | read only |
+| Battery-first time windows | holding 1100..1108 / 3044, 3050, 3052 | – | yes | read only |
+| Load-first time windows | holding 1110..1118 / 3054, 3056, 3058 | – | yes | read only |
 
-"No effect" is literal and is a known gap: identification reads the 1070 block
-on any slot with storage, including a TL-XH, which answers it with zeros rather
-than an exception. The entities therefore exist, read back as zero, and accept
-writes that go nowhere. The family keeps the same functions in its own holding
-block, listed below; nothing reads or writes it yet.
+"Read only" means the entity shows what the register says and refuses to write
+it. Identification used to read the 1070 block on any slot with storage,
+including a TL-XH, which answers it with zeros rather than an exception, so the
+entities existed, read back as zero and accepted writes that went nowhere. They
+now read the family's own block. Writing it waits for a bench test: this is the
+one family where a refused change is acknowledged rather than refused, so an
+accepted write is not evidence of an applied one.
 
 ### The TL-XH storage settings block
 
-From the protocol document, not yet confirmed against hardware. None of these
-addresses is read or written by the component; they are here so the next change
-starts from a written down map rather than from a dump.
+From the protocol document. The block is read at identification and published;
+none of it is written yet.
 
 | Register | Meaning | SPH equivalent |
 | --- | --- | --- |

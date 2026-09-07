@@ -293,6 +293,44 @@ enum WindowMode : uint8_t {
 uint16_t sph_window_base(uint8_t mode);
 const char *window_mode_text(uint8_t mode);
 
+// TL-XH storage settings, holding 3036..3059 in one read. The rates and stop
+// SOCs are the same values the SPH keeps at 1070 and 1090; the windows are not
+// the same shape at all - see below.
+static const uint16_t XH_SETTINGS_BASE = 3036;
+static const uint8_t XH_SETTINGS_CNT = 24;      // 3036..3059
+static const uint16_t XH_GF_DISCHARGE_RATE = 3036;
+static const uint16_t XH_GF_STOP_SOC = 3037;
+static const uint16_t XH_BF_CHARGE_RATE = 3047;
+static const uint16_t XH_BF_STOP_SOC = 3048;
+static const uint16_t XH_BF_AC_CHARGE = 3049;
+
+// Nine windows in one list, two registers each, split by the battery first
+// parameters that sit between the fourth and the fifth: 3038, 3040, 3042, 3044,
+// then 3050 to 3058. Which mode a window belongs to is not its position but
+// bits 13..14 of its start word, so mapping periods onto thirds of that list is
+// a convention this component imposes to get one entity set across both
+// families - see README.md. It is never enforced on read.
+uint16_t xh_window_base(uint8_t mode, uint8_t period);
+
+// Layout of a TL-XH window start word. The stop word carries the same time
+// fields and nothing in bits 13..15.
+static const uint16_t XH_WIN_MINUTE_MASK = 0x00FF;
+static const uint8_t XH_WIN_HOUR_SHIFT = 8;
+static const uint16_t XH_WIN_HOUR_MASK = 0x1F;
+static const uint8_t XH_WIN_PRIORITY_SHIFT = 13;
+static const uint16_t XH_WIN_PRIORITY_MASK = 0x3;
+static const uint16_t XH_WIN_ENABLED = 0x8000;
+
+// The priority a TL-XH window declares, in the encoding the register uses.
+// Not the same numbering as WindowMode, which is ours.
+enum XhPriority : uint8_t {
+  XH_PRIO_LOAD_FIRST = 0,
+  XH_PRIO_BATTERY_FIRST = 1,
+  XH_PRIO_GRID_FIRST = 2,
+};
+uint8_t xh_priority_for_mode(uint8_t mode);
+const char *xh_priority_text(uint8_t prio);
+
 // Parts of a time window addressable from the UI
 enum WindowPart : uint8_t {
   PART_START_HOUR = 0,
@@ -336,6 +374,12 @@ struct TimeWindow {
   uint8_t stop_h{0};
   uint8_t stop_m{0};
   bool enabled{false};
+  // What the register says this window's priority is, on a family that keeps
+  // it in the window. Filled from the slot's own mode on an SPH, where the
+  // block decides it. Kept so a write can carry it forward rather than
+  // reinventing it, and so a disagreement with our slot convention is visible
+  // rather than silently corrected.
+  uint8_t priority{XH_PRIO_LOAD_FIRST};
 };
 
 static const uint8_t WRITE_QUEUE_SIZE = 4;
@@ -976,6 +1020,12 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   void parse_device_info_(std::span<const uint16_t> data);
   void parse_storage_(std::span<const uint16_t> data);
   void parse_settings_(std::span<const uint16_t> data);
+  void parse_settings_xh_(std::span<const uint16_t> data);
+  // Where a setting lives on this slot's family, 0 when it has no such
+  // register, and whether its storage block may be written at all.
+  uint16_t setting_addr_(uint8_t field) const;
+  uint16_t ac_charge_addr_() const;
+  bool settings_writable_() const;
   void publish_derived_();
   void publish_settings_();
   void apply_protection_limits_();

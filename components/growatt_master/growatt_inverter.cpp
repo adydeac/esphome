@@ -155,6 +155,16 @@ static const uint16_t SETTING_ADDR[SET_COUNT] = {
     HO_GRID_V_HIGH,        HO_GRID_F_LOW,        HO_GRID_F_HIGH,
     HO_EXPORT_LIMIT_RATE,
 };
+// The four storage settings the TL-XH keeps in its own block. Everything else
+// in SETTING_ADDR is in the first holding group and is the same address on
+// every family. Zero means "this family does not have it".
+static const uint16_t XH_SETTING_ADDR[SET_COUNT] = {
+    REG_ACTIVE_POWER_RATE, XH_GF_DISCHARGE_RATE, XH_GF_STOP_SOC,
+    XH_BF_CHARGE_RATE,     XH_BF_STOP_SOC,       HO_PV_START_VOLT,
+    HO_START_TIME,         HO_RESTART_DELAY,     HO_GRID_V_LOW,
+    HO_GRID_V_HIGH,        HO_GRID_F_LOW,        HO_GRID_F_HIGH,
+    HO_EXPORT_LIMIT_RATE,
+};
 static const float SETTING_SCALE[SET_COUNT] = {
     1.0f,    1.0f,    1.0f,    1.0f,    1.0f, ONE_DEC, 1.0f,
     1.0f,    ONE_DEC, ONE_DEC, TWO_DEC, TWO_DEC, ONE_DEC,
@@ -186,6 +196,40 @@ uint16_t sph_window_base(uint8_t mode) {
     case MODE_BATTERY_FIRST: return HO_BF_WINDOW_BASE;
     case MODE_LOAD_FIRST: return HO_LF_WINDOW_BASE;
     default: return 0;
+  }
+}
+
+// Declaration order is the convention, not the hardware's: any of the nine may
+// carry any priority.
+static const uint16_t XH_WINDOWS[MODE_COUNT * PERIOD_COUNT] = {
+    3038, 3040, 3042,   // periods 1..3
+    3044, 3050, 3052,   // periods 4..6
+    3054, 3056, 3058,   // periods 7..9
+};
+
+uint16_t xh_window_base(uint8_t mode, uint8_t period) {
+  if (mode >= MODE_COUNT || period >= PERIOD_COUNT)
+    return 0;
+  return XH_WINDOWS[mode * PERIOD_COUNT + period];
+}
+
+// Our mode numbering and the register's are not the same, and neither is worth
+// changing to match: ours is the order the periods appear in, the register's is
+// Growatt's.
+uint8_t xh_priority_for_mode(uint8_t mode) {
+  switch (mode) {
+    case MODE_GRID_FIRST: return XH_PRIO_GRID_FIRST;
+    case MODE_BATTERY_FIRST: return XH_PRIO_BATTERY_FIRST;
+    default: return XH_PRIO_LOAD_FIRST;
+  }
+}
+
+const char *xh_priority_text(uint8_t prio) {
+  switch (prio) {
+    case XH_PRIO_LOAD_FIRST: return "load first";
+    case XH_PRIO_BATTERY_FIRST: return "battery first";
+    case XH_PRIO_GRID_FIRST: return "grid first";
+    default: return "unknown";
   }
 }
 
@@ -811,7 +855,10 @@ void GrowattInverter::send_step_() {
         ok = this->read_input_registers(REG_BAT_BASE, REG_BAT_CNT);
       break;
     case IDENT_SETTINGS:
-      ok = this->read_holding_registers(HO_SETTINGS_BASE, HO_SETTINGS_CNT);
+      ok = this->caps_.storage_family == STORAGE_TLXH
+               ? this->read_holding_registers(XH_SETTINGS_BASE, XH_SETTINGS_CNT)
+               : this->read_holding_registers(HO_SETTINGS_BASE,
+                                              HO_SETTINGS_CNT);
       break;
     default:
       return;
@@ -1028,6 +1075,9 @@ void GrowattInverter::parse_device_info_(std::span<const uint16_t> data) {
   // Editable settings that live in the first holding group get their initial
   // value here, so the UI starts out matching the inverter.
   for (uint8_t f = 0; f < SET_COUNT; f++) {
+    // The flat table on purpose, not setting_addr_(): this runs before the
+    // storage family is known, and the first holding group is the one place
+    // where both tables hold the same address anyway.
     if (SETTING_ADDR[f] < FIRST_GROUP_CNT)
       this->settings_[f] = reg16(data, SETTING_ADDR[f]);
   }
@@ -1861,12 +1911,47 @@ void GrowattInverter::apply_protection_limits_() {
   this->publish_settings_();
 }
 
+uint16_t GrowattInverter::setting_addr_(uint8_t field) const {
+  if (field >= SET_COUNT)
+    return 0;
+  return this->caps_.storage_family == STORAGE_TLXH ? XH_SETTING_ADDR[field]
+                                                    : SETTING_ADDR[field];
+}
+
+uint16_t GrowattInverter::ac_charge_addr_() const {
+  return this->caps_.storage_family == STORAGE_TLXH ? XH_BF_AC_CHARGE
+                                                    : HO_BF_AC_CHARGE;
+}
+
+// Nothing in the TL-XH storage block has been written on hardware yet, and this
+// is the one family where a refused write does not look like one: the firmware
+// answers a change it will not make with an acknowledgement. Reading the block
+// is what this change is for; writing it waits for a bench test that can tell
+// an accepted write from an applied one. One predicate rather than a check at
+// each call site, so removing the gate is one line.
+bool GrowattInverter::settings_writable_() const {
+  if (this->caps_.storage_family != STORAGE_TLXH)
+    return true;
+  ESP_LOGW(TAG,
+           "slot %u: the TL-XH settings block is read only until its writes "
+           "have been verified on hardware",
+           this->slot_index_);
+  return false;
+}
+
 void GrowattInverter::set_setting(uint8_t field, float value) {
   if (field >= SET_COUNT)
     return;
+  uint16_t addr = this->setting_addr_(field);
+  if (addr == 0)
+    return;
+  // Only the storage settings moved; the first holding group is the same
+  // register on every family and stays writable.
+  if (addr >= XH_SETTINGS_BASE && !this->settings_writable_())
+    return;
   uint16_t raw = (uint16_t) lroundf(value / SETTING_SCALE[field]);
   this->settings_[field] = raw;
-  this->queue_write_(CMD_WRITE_SINGLE, SETTING_ADDR[field], &raw, 1);
+  this->queue_write_(CMD_WRITE_SINGLE, addr, &raw, 1);
 }
 
 float GrowattInverter::get_setting(uint8_t field) const {
@@ -1922,9 +2007,11 @@ void GrowattInverter::set_register_switch(uint16_t address, uint16_t on_value,
 }
 
 void GrowattInverter::set_ac_charge(bool on) {
+  if (!this->settings_writable_())
+    return;
   this->ac_charge_ = on;
   uint16_t v = on ? 1 : 0;
-  this->queue_write_(CMD_WRITE_SINGLE, HO_BF_AC_CHARGE, &v, 1);
+  this->queue_write_(CMD_WRITE_SINGLE, this->ac_charge_addr_(), &v, 1);
 }
 
 // ---------------------------- time windows ----------------------------
@@ -2043,6 +2130,15 @@ bool GrowattInverter::apply_windows(uint8_t mode) {
     return false;
   }
 
+  if (this->caps_.storage_family == STORAGE_TLXH) {
+    // The pair is written with one 0x10 and the flags composed into the start
+    // word; none of that is exercised yet, and a half written window is a
+    // schedule nobody asked for.
+    ESP_LOGW(TAG, "slot %u: TL-XH window writing is not implemented yet",
+             this->slot_index_);
+    return false;
+  }
+
   std::string reason;
   if (this->windows_overlap(&reason)) {
     ESP_LOGE(TAG, "slot %u: refusing to write, %s", this->slot_index_,
@@ -2088,7 +2184,7 @@ void GrowattInverter::set_setting_number(uint8_t field, number::Number *n) {
 void GrowattInverter::parse_settings_(std::span<const uint16_t> data) {
   // offsets relative to 1070
   for (uint8_t f = 0; f < SET_COUNT; f++) {
-    uint16_t addr = SETTING_ADDR[f];
+    uint16_t addr = this->setting_addr_(f);
     if (addr >= HO_SETTINGS_BASE && addr < HO_SETTINGS_BASE + HO_SETTINGS_CNT)
       this->settings_[f] = reg16(data, addr - HO_SETTINGS_BASE);
   }
@@ -2113,6 +2209,9 @@ void GrowattInverter::parse_settings_(std::span<const uint16_t> data) {
       w.stop_h = (stop >> 8) & 0x1F;
       w.stop_m = stop & 0xFF;
       w.enabled = reg16(data, off + p * 3 + 2) != 0;
+      // On this family the block is the priority, so there is nothing to read
+      // and nothing that can disagree.
+      w.priority = xh_priority_for_mode(m);
     }
   }
   this->publish_settings_();
@@ -2120,6 +2219,61 @@ void GrowattInverter::parse_settings_(std::span<const uint16_t> data) {
            this->slot_index_, this->settings_[SET_GF_DISCHARGE_RATE],
            this->settings_[SET_GF_STOP_SOC], this->settings_[SET_BF_CHARGE_RATE],
            this->settings_[SET_BF_STOP_SOC], this->ac_charge_ ? "on" : "off");
+}
+
+// The same job for the other family: holding 3036..3059. The rates and stop
+// SOCs are plain values at different addresses, so they land in settings_ the
+// same way. The windows are the part that is genuinely different - nine of
+// them, two registers each, with the enable and the priority riding in the
+// start word.
+void GrowattInverter::parse_settings_xh_(std::span<const uint16_t> data) {
+  for (uint8_t f = 0; f < SET_COUNT; f++) {
+    uint16_t addr = this->setting_addr_(f);
+    if (addr >= XH_SETTINGS_BASE && addr < XH_SETTINGS_BASE + XH_SETTINGS_CNT)
+      this->settings_[f] = reg16(data, addr - XH_SETTINGS_BASE);
+  }
+  this->ac_charge_ = reg16(data, XH_BF_AC_CHARGE - XH_SETTINGS_BASE) != 0;
+  this->publish_reg_entities_(data, XH_SETTINGS_BASE, XH_SETTINGS_CNT);
+
+  uint8_t mismatched = 0;
+  for (uint8_t m = 0; m < MODE_COUNT; m++) {
+    for (uint8_t p = 0; p < PERIOD_COUNT; p++) {
+      uint16_t base = xh_window_base(m, p);
+      size_t off = base - XH_SETTINGS_BASE;
+      uint16_t start = reg16(data, off);
+      uint16_t stop = reg16(data, off + 1);
+      TimeWindow &w = this->windows_[m][p];
+      w.start_h = (start >> XH_WIN_HOUR_SHIFT) & XH_WIN_HOUR_MASK;
+      w.start_m = start & XH_WIN_MINUTE_MASK;
+      w.stop_h = (stop >> XH_WIN_HOUR_SHIFT) & XH_WIN_HOUR_MASK;
+      w.stop_m = stop & XH_WIN_MINUTE_MASK;
+      w.enabled = (start & XH_WIN_ENABLED) != 0;
+      w.priority = (start >> XH_WIN_PRIORITY_SHIFT) & XH_WIN_PRIORITY_MASK;
+      // Which third of the nine a window sits in is our convention; the bits
+      // are the inverter's. Where they disagree the register wins, because
+      // whatever put it there meant it - ShinePhone can write any priority
+      // into any window. Correcting it belongs to the next write of that
+      // window, not to boot.
+      if (w.enabled && w.priority != xh_priority_for_mode(m)) {
+        mismatched++;
+        ESP_LOGW(TAG,
+                 "slot %u: window %u (%u) is %02u:%02u-%02u:%02u and says %s, "
+                 "not the %s this period stands for - left as it is",
+                 this->slot_index_, m * PERIOD_COUNT + p + 1, base, w.start_h,
+                 w.start_m, w.stop_h, w.stop_m, xh_priority_text(w.priority),
+                 window_mode_text(m));
+      }
+    }
+  }
+
+  this->publish_settings_();
+  ESP_LOGI(TAG,
+           "slot %u: settings read back (GF %u%%/%u%%, BF %u%%/%u%%, AC %s), "
+           "%u window(s) not in their conventional priority",
+           this->slot_index_, this->settings_[SET_GF_DISCHARGE_RATE],
+           this->settings_[SET_GF_STOP_SOC], this->settings_[SET_BF_CHARGE_RATE],
+           this->settings_[SET_BF_STOP_SOC], this->ac_charge_ ? "on" : "off",
+           mismatched);
 }
 
 void GrowattInverter::publish_settings_() {
@@ -2453,8 +2607,13 @@ void GrowattInverter::on_read_registers(modbus::EntityType entity_type,
       break;
     }
     case IDENT_SETTINGS: {
-      if (data.size() < HO_SETTINGS_CNT) { this->advance_(false); return; }
-      this->parse_settings_(data);
+      if (this->caps_.storage_family == STORAGE_TLXH) {
+        if (data.size() < XH_SETTINGS_CNT) { this->advance_(false); return; }
+        this->parse_settings_xh_(data);
+      } else {
+        if (data.size() < HO_SETTINGS_CNT) { this->advance_(false); return; }
+        this->parse_settings_(data);
+      }
       break;
     }
     default:
