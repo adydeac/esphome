@@ -842,8 +842,10 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // the same window the health machine uses to tell a comms glitch from a unit
   // that has actually stopped. After that it contributes nothing, so the totals
   // fall as units drop out instead of quoting numbers from hours ago.
+  // A slot still connecting has never answered, so it is not present yet.
   bool contributes() const {
-    return this->is_enabled() && this->health_ != INV_OFFLINE;
+    return this->is_enabled() &&
+           (this->health_ == INV_ONLINE || this->health_ == INV_STALLED);
   }
 
   /// Nameplate scaled by the configured rate ceiling, counted whatever the
@@ -1129,6 +1131,16 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   // depends on that is one worth not writing.
   uint32_t first_send_ms_{0};
   bool ever_asked_{false};
+  // millis() of the first time this slot wanted the bus, whether or not the bus
+  // took the frame. On modbus_tcp that can be well before first_send_ms_, and
+  // for a dongle that never connects there is no first_send_ms_ at all - which
+  // left such a slot "connecting" forever.
+  uint32_t first_want_ms_{0};
+  bool ever_wanted_{false};
+  // Set the first time the slot is declared offline. From then on a slot that
+  // has never answered stays offline until it does: the probe's first frame
+  // must not reopen the startup grace and pass for a unit coming back.
+  bool startup_over_{false};
   uint32_t last_probe_{0};
   bool probing_{false};
   PollBlock poll_{POLL_IDLE};

@@ -623,6 +623,15 @@ scheduled like an online slot so identification keeps trying, but
 `is_online()` is false, so the controller does not plan against a unit it has
 never heard from.
 
+It is also bounded. A slot the bus has not yet taken a frame for is timed from
+the first time it tried to send, so a dongle that never connects goes offline
+after the same grace as any other silent unit. That does not bring back the
+uptime penalty above: such a slot's offline probe is armed at once rather than
+a probe interval later, and waits for the transport, so its first frame still
+goes out the moment one can. Once declared offline, a slot that has never
+answered stays offline until it does - the probe's first frame does not reopen
+the grace and pass for a unit coming back.
+
 The controller stays out of the way while that is happening. `refresh_all_()`
 skips slots that have not finished identifying - there is no setpoint in force
 to reassert, and identification re-applies the rate itself when it completes -
@@ -851,7 +860,8 @@ controller starts limiting, and the gap between them is the headroom.
 
 **A unit that goes quiet keeps its last figures until it is declared offline**,
 reusing the health machine's own window rather than adding a parameter. `STALLED`
-still contributes; `OFFLINE` contributes nothing. Without that cutoff a unit
+still contributes; `OFFLINE` and `STARTING` contribute nothing. A slot still
+connecting has never answered, so it is not present yet. Without that cutoff a unit
 that died at 1000 W would keep adding 1000 W forever, and the totals would stay
 inflated exactly when you are looking at them to find out what dropped.
 

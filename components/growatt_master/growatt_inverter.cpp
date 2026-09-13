@@ -503,17 +503,11 @@ void GrowattInverter::update_health_() {
     // there is nothing to wait a timeout for. Declaring it offline at once
     // keeps it off the bus and off the dispatch.
     h = INV_OFFLINE;
-  } else if (!this->ever_asked_) {
-    // Never asked anything yet, so there is nothing to conclude. try_send_()
-    // only queues a frame once the bus will take one, and a modbus_tcp hub will
-    // not take one until its socket is up - so this state covers the whole
-    // period in which the transport is still finding its way to the inverter.
-    // A slot cannot be blamed for silence it was never given a chance to break,
-    // but it has not earned "online" either: on a dongle that never connects,
-    // this state lasts indefinitely.
+  } else if (!this->ever_wanted_) {
+    // Has not tried to send anything yet, so there is nothing to conclude.
     h = INV_STARTING;
   } else if (this->last_update_ == 0) {
-    // Asked, never answered. The window is measured from the first request that
+    // Never answered. The window is measured from the first request that
     // actually left this node rather than from boot, because boot is much
     // earlier than that: WiFi association, DHCP, the transport's connect - which
     // a modbus_tcp hub retries no sooner than reconnect_interval - and the other
@@ -522,8 +516,18 @@ void GrowattInverter::update_health_() {
     // offline_probe_interval of enforced silence for a fault that was never its
     // own. Its own window too, not offline_ms_: coming up cold is a different
     // question from having gone quiet, it is slower, and it happens once.
-    h = (now - this->first_send_ms_ > this->startup_grace_ms_) ? INV_OFFLINE
-                                                               : INV_STARTING;
+    //
+    // A slot the bus has not taken a frame for yet is timed from when it first
+    // tried instead. try_send_() only queues once the bus will take a frame, and
+    // a modbus_tcp hub will not until its socket is up, so on a dongle that
+    // never connects there is no first request and "connecting" would last
+    // forever. The cost the first request rule exists to avoid does not come
+    // back: the offline path below arms the probe of a never-asked slot at
+    // once, so its first frame still goes out the moment the transport takes it.
+    uint32_t since = this->ever_asked_ ? this->first_send_ms_ : this->first_want_ms_;
+    h = (this->startup_over_ || now - since > this->startup_grace_ms_)
+            ? INV_OFFLINE
+            : INV_STARTING;
   } else {
     uint32_t age = (micros() - this->last_update_) / 1000;
     if (age < this->stalled_ms_)
@@ -543,13 +547,22 @@ void GrowattInverter::update_health_() {
     this->state_ts_->publish_state(this->health_text());
 
   if (h == INV_OFFLINE) {
-    ESP_LOGW(TAG, "slot %u went offline, backing off to a probe every %u s",
-             this->slot_index_, (unsigned) (this->offline_probe_ms_ / 1000));
+    if (this->ever_asked_)
+      ESP_LOGW(TAG, "slot %u went offline, backing off to a probe every %u s",
+               this->slot_index_, (unsigned) (this->offline_probe_ms_ / 1000));
+    else
+      ESP_LOGW(TAG, "slot %u: the bus never took a request for it, offline; "
+               "probing as soon as the transport allows",
+               this->slot_index_);
     this->zero_instantaneous_();
     this->waiting_ = false;
     this->want_send_ = false;
     this->poll_ = POLL_IDLE;
-    this->last_probe_ = now;
+    this->startup_over_ = true;
+    // A slot the bus never took a frame for has had no chance to answer, so its
+    // probe is armed at once rather than a full probe interval later. It then
+    // waits in want_send_ until the transport will take it.
+    this->last_probe_ = this->ever_asked_ ? now : now - this->offline_probe_ms_;
   } else if (was == INV_OFFLINE) {
     // Back from the dead. Everything it was told may have been lost across a
     // power cycle, so identify again, which also re-applies the trip limits.
@@ -713,6 +726,13 @@ void GrowattInverter::start_poll_() {
 }
 
 void GrowattInverter::try_send_() {
+  // Where the startup grace of a slot the bus never takes a frame for is
+  // counted from. Before the yield and the busy check on purpose: this is the
+  // moment the slot wanted to ask, not the moment it could.
+  if (!this->ever_wanted_) {
+    this->ever_wanted_ = true;
+    this->first_want_ms_ = millis();
+  }
   // Step aside briefly after our own transaction so the other devices get a
   // turn before we ask again.
   if (millis() - this->bus_release_ < BUS_YIELD_MS)
