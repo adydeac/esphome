@@ -271,6 +271,9 @@ void GrowattInverter::setup() {
         this->set_update_interval((uint32_t) p.update_interval * 1000);
       if (p.slow_interval > 0)
         this->slow_interval_ = (uint32_t) p.slow_interval * 1000;
+      // Zero in a store written before the field existed, which reads as unset.
+      if (p.nameplate_10va >= 50 && p.nameplate_10va <= 10000)
+        this->cfg_nameplate_va_ = (uint32_t) p.nameplate_10va * 10;
       ESP_LOGI(TAG,
                "slot %u: restored addr=%u phases=%d strings=%d wired=L%u safe=%u%%",
                this->slot_index_, p.address, p.cfg_phases, p.cfg_strings,
@@ -280,6 +283,13 @@ void GrowattInverter::setup() {
                "using defaults", this->slot_index_, p.version, PREFS_VERSION);
     }
   }
+  // Until the unit reports its own, a configured nameplate stands in for it.
+  if (this->cfg_nameplate_va_ > 0) {
+    this->normal_power_va_ = this->cfg_nameplate_va_;
+    this->normal_power_valid_ = true;
+  }
+  if (this->nameplate_num_ != nullptr)
+    this->nameplate_num_->publish_state(this->cfg_nameplate_va_);
   if (this->safe_rate_num_ != nullptr)
     this->safe_rate_num_->publish_state(this->safe_power_rate_);
   if (this->min_rate_num_ != nullptr)
@@ -328,6 +338,7 @@ void GrowattInverter::save_prefs_() {
   p.protect_eeprom = this->protect_eeprom_ ? 1 : 0;
   p.update_interval = (uint16_t) (this->get_update_interval() / 1000);
   p.slow_interval = (uint16_t) (this->slow_interval_ / 1000);
+  p.nameplate_10va = (uint16_t) (this->cfg_nameplate_va_ / 10);
   this->pref_.save(&p);
 }
 
@@ -1107,6 +1118,7 @@ void GrowattInverter::parse_device_info_(std::span<const uint16_t> data) {
   if (p > 0 && p < 500.0f)
     p *= 10.0f;
   this->normal_power_va_ = p;
+  this->nameplate_read_ = true;
   // The controller scales its steps by this figure, so an implausible reading
   // must disable proportional control rather than produce wild jumps.
   this->normal_power_valid_ = (p >= 500.0f && p <= 100000.0f);
@@ -1114,8 +1126,21 @@ void GrowattInverter::parse_device_info_(std::span<const uint16_t> data) {
     ESP_LOGW(TAG, "slot %u: implausible nameplate power %.0f VA, ignoring",
              this->slot_index_, p);
   }
+  // The sensor is what the unit said, whatever is done with it below.
+  pub_val(this->normal_power_, p);
 
-  pub_val(this->normal_power_, this->normal_power_va_);
+  if (this->normal_power_valid_) {
+    // The unit's own figure wins over a configured one, and replaces it.
+    this->adopt_nameplate_();
+  } else if (this->cfg_nameplate_va_ > 0) {
+    // An unusable reading does not undo a usable configured figure.
+    this->normal_power_va_ = this->cfg_nameplate_va_;
+    this->normal_power_valid_ = true;
+    this->nameplate_read_ = false;
+    ESP_LOGW(TAG, "slot %u: keeping the configured nameplate of %u VA",
+             this->slot_index_, (unsigned) this->cfg_nameplate_va_);
+  }
+
   pub1(this->modbus_version_, data, HO_MODBUS_VER, TWO_DEC);
   pub1(this->active_rate_, data, HO_ACTIVE_RATE, 1.0f);
   pub1(this->reactive_rate_, data, HO_REACTIVE_RATE, 1.0f);
@@ -1796,7 +1821,10 @@ float GrowattInverter::available_headroom() const {
 }
 
 void GrowattInverter::revise_nameplate_() {
-  if (this->nameplate_revised_ || this->normal_power_va_ <= 0)
+  // Only a figure the unit reported can be in the wrong unit; a configured one
+  // is whatever the user typed, and multiplying it by ten would corrupt it.
+  if (this->nameplate_revised_ || !this->nameplate_read_ ||
+      this->normal_power_va_ <= 0)
     return;
 
   const char *why = nullptr;
@@ -1826,6 +1854,48 @@ void GrowattInverter::revise_nameplate_() {
            "nameplate corrected to %.0f VA",
            this->slot_index_, why, from, to);
   pub_val(this->normal_power_, this->normal_power_va_);
+  this->adopt_nameplate_();
+}
+
+// The inverter has reported a usable nameplate: it replaces the configured one,
+// in the entity and in flash, so the next boot starts from the real figure.
+// Written only on a change, so a unit that keeps reporting the same figure
+// costs no flash at all.
+void GrowattInverter::adopt_nameplate_() {
+  uint32_t va = (uint32_t) lroundf(this->normal_power_va_ / 10.0f) * 10;
+  if (va == this->cfg_nameplate_va_)
+    return;
+  ESP_LOGI(TAG, "slot %u: nameplate %u VA reported by the inverter, replacing "
+           "the configured %u VA",
+           this->slot_index_, (unsigned) va, (unsigned) this->cfg_nameplate_va_);
+  this->cfg_nameplate_va_ = va;
+  this->save_prefs_();
+  if (this->nameplate_num_ != nullptr)
+    this->nameplate_num_->publish_state(va);
+}
+
+void GrowattInverter::apply_nameplate(float v) {
+  uint32_t va = v <= 0 ? 0 : (uint32_t) lroundf(v / 10.0f) * 10;
+  const char *refused = nullptr;
+  if (this->nameplate_read_ && this->normal_power_valid_)
+    refused = "the inverter's own figure takes precedence";
+  else if (va != 0 && (va < 500 || va > 100000))
+    refused = "outside 500..100000 VA";
+  if (refused != nullptr) {
+    ESP_LOGW(TAG, "slot %u: nameplate %u VA not applied, %s", this->slot_index_,
+             (unsigned) va, refused);
+    if (this->nameplate_num_ != nullptr)
+      this->nameplate_num_->publish_state(this->cfg_nameplate_va_);
+    return;
+  }
+  this->cfg_nameplate_va_ = va;
+  this->save_prefs_();
+  if (this->nameplate_num_ != nullptr)
+    this->nameplate_num_->publish_state(va);
+  this->normal_power_va_ = (float) va;
+  this->normal_power_valid_ = va > 0;
+  ESP_LOGI(TAG, "slot %u: configured nameplate %u VA", this->slot_index_,
+           (unsigned) va);
 }
 
 bool GrowattInverter::can_produce_more() const {

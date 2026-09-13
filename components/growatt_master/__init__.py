@@ -77,6 +77,7 @@ OFFLINE_ACTIONS = ["Stop", "Hold", "Hold then reduce"]
 CONF_OFFLINE_ACTION = "meter_offline_action"
 CONF_OFFLINE_HOLD = "meter_offline_hold"
 CONF_SAFE_RATE = "safe_power_rate"
+CONF_NAMEPLATE = "nameplate_power"
 # Must match CONV_NAMES in growatt_inverter.cpp.
 CONVENTIONS = ["Auto", "Phase", "Line"]
 # kind indices must match RATE_* in growatt_inverter.cpp
@@ -150,6 +151,7 @@ GrowattOfflineActionSelect = ns.class_(
     "GrowattOfflineActionSelect", select.Select
 )
 GrowattSafeRateNumber = ns.class_("GrowattSafeRateNumber", number.Number)
+GrowattNameplateNumber = ns.class_("GrowattNameplateNumber", number.Number)
 GrowattRateNumber = ns.class_("GrowattRateNumber", number.Number)
 GrowattConventionSelect = ns.class_("GrowattConventionSelect", select.Select)
 GrowattInverterOptionSwitch = ns.class_(
@@ -684,6 +686,13 @@ def _inverter_schema():
         cv.Optional(CONF_SAFE_RATE): _box_number(
             GrowattSafeRateNumber, icon="mdi:shield-half-full",
             unit_of_measurement=UNIT_PERCENT,
+        ),
+        # Nameplate to assume until the inverter reports its own, so a unit that
+        # has never answered still counts in installed_capacity. 0 is unset. The
+        # reported figure replaces it, in flash too, as soon as one arrives.
+        cv.Optional(CONF_NAMEPLATE): _box_number(
+            GrowattNameplateNumber, icon="mdi:solar-power-variant",
+            unit_of_measurement=UNIT_VOLT_AMPS,
         ),
         **{
             cv.Optional(k): _box_number(
@@ -1282,6 +1291,13 @@ async def to_code(config):
             )
             cg.add(snum.set_parent(inv))
             cg.add(inv.set_safe_rate_number(snum))
+
+        if CONF_NAMEPLATE in conf:
+            npnum = await number.new_number(
+                conf[CONF_NAMEPLATE], min_value=0, max_value=100000, step=10
+            )
+            cg.add(npnum.set_parent(inv))
+            cg.add(inv.set_nameplate_number(npnum))
 
         num = await number.new_number(
             conf[CONF_ADDRESS], min_value=0, max_value=254, step=1

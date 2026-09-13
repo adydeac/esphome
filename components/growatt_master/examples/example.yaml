@@ -203,6 +203,10 @@ growatt_master:
         name: "Growatt01 Slow Poll Interval"
       safe_power_rate:
         name: "Growatt01 Safe Power Rate"
+      # Assumed until the inverter reports its own nameplate, which then
+      # replaces it. Lets a unit that has never answered count as installed.
+      nameplate_power:
+        name: "Growatt01 Nameplate Power"
       voltage_convention_select:
         name: "Growatt01 Voltage Convention"
       auto_protection_limits_switch:
@@ -602,6 +606,8 @@ growatt_master:
         name: "Growatt02 Max Power Rate"
       safe_power_rate:
         name: "Growatt02 Safe Power Rate"
+      nameplate_power:
+        name: "Growatt02 Nameplate Power"
       grid_active_power:
         name: "Growatt02 Grid Active Power"
       battery_soc:

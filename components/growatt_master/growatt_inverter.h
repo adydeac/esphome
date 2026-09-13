@@ -524,7 +524,8 @@ struct GrowattSlotPrefs {
   uint8_t protect_eeprom;
   uint16_t update_interval;   // seconds
   uint16_t slow_interval;     // seconds
-  uint8_t reserved[12];
+  uint16_t nameplate_10va;    // configured nameplate, 10 VA units; 0 = unset
+  uint8_t reserved[10];
 } __attribute__((packed));
 
 // Voltage / current / power triple, reused for grid phases, PV strings and
@@ -719,6 +720,12 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   uint8_t get_safe_power_rate() const { return this->safe_power_rate_; }
   void apply_safe_power_rate(float v);
   void set_safe_rate_number(number::Number *n) { this->safe_rate_num_ = n; }
+  // Nameplate to assume until the inverter reports its own, in VA; 0 is unset.
+  // Set from the UI and persisted, and replaced - entity and flash - by the
+  // unit's own figure as soon as it answers with a usable one. While that
+  // figure is in force, an edit is refused rather than overriding it.
+  void apply_nameplate(float va);
+  void set_nameplate_number(number::Number *n) { this->nameplate_num_ = n; }
   // Runtime edits. Each stores, persists, and where it matters takes effect at
   // once rather than at the next identification.
   void apply_min_power_rate(float v);
@@ -1175,6 +1182,12 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
 
   uint8_t safe_power_rate_{0};
   number::Number *safe_rate_num_{nullptr};
+  // The configured nameplate in VA, 0 when unset, and whether normal_power_va_
+  // currently holds what the inverter reported rather than the configured one.
+  uint32_t cfg_nameplate_va_{0};
+  bool nameplate_read_{false};
+  number::Number *nameplate_num_{nullptr};
+  void adopt_nameplate_();
   number::Number *min_rate_num_{nullptr};
   number::Number *max_rate_num_{nullptr};
   number::Number *update_num_{nullptr};
@@ -1658,6 +1671,21 @@ class GrowattSafeRateNumber : public number::Number {
     this->publish_state(value);
     if (this->parent_ != nullptr)
       this->parent_->apply_safe_power_rate(value);
+  }
+  GrowattInverter *parent_{nullptr};
+};
+
+// Nameplate to assume until the inverter reports one, which is what lets a unit
+// that has never answered still count in installed_capacity. The parent
+// publishes the state itself, so a refused value snaps back.
+class GrowattNameplateNumber : public number::Number {
+ public:
+  void set_parent(GrowattInverter *p) { this->parent_ = p; }
+
+ protected:
+  void control(float value) override {
+    if (this->parent_ != nullptr)
+      this->parent_->apply_nameplate(value);
   }
   GrowattInverter *parent_{nullptr};
 };

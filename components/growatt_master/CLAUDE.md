@@ -415,7 +415,8 @@ addressed individually. The only way out is one device on the bus at a time.
 
 Three structures, one per class, each under its own key: `growatt_hub_settings`
 holds the thresholds and the offline action, `growatt_slot_N` the address, phase
-and string overrides, wiring and safe rate, and `growatt_meter_N` the address
+and string overrides, wiring, safe rate and configured nameplate, and
+`growatt_meter_N` the address
 and model. Nothing else is stored.
 
 Every one of them starts with a version byte and ends with reserved space, and
@@ -461,7 +462,7 @@ a change into the member. `update_interval` needs more than that: a
 `PollingComponent` will not notice a new interval, so the poller is stopped,
 retimed and started again.
 
-Per inverter: min and max power rate, safe rate, both poll intervals, voltage
+Per inverter: min and max power rate, safe rate, nameplate, both poll intervals, voltage
 convention, automatic protection limits, EEPROM setting memory. Per meter: both
 poll intervals.
 
@@ -847,6 +848,17 @@ Two guards apply to every contribution: a slot at address 0 counts nothing, and
 a slot whose nameplate never validated counts zero rather than counting a
 nonsense figure at face value. If an `installed_capacity` comes out lower than
 expected, the second one is where to look.
+
+A configured `nameplate_power` stands in until the unit reports its own, which
+is what lets a unit that has never answered count in `installed_capacity`. The
+reported figure replaces it the moment a usable one arrives, entity and flash
+included, and while it is in force the entity refuses edits: the inverter is the
+authority on its own rating, and a typed figure is only a placeholder for it.
+An implausible reading does not wipe a configured figure, and
+`revise_nameplate_()` never touches one - only a reported figure can be in the
+wrong unit. It sits in two of the slot's reserved bytes, where a store written
+before it existed reads zero, which is exactly "unset", so no version bump and
+no `written` mask were needed.
 
 **Capability is an estimate with a lifetime, not a property.** It can only be
 inferred while our own rate limit is what the unit is pressing against
