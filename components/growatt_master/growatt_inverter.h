@@ -465,10 +465,18 @@ enum VoltageConvention : uint8_t {
 // Health of one inverter. Some models shut down completely when the panels go
 // dark, and querying a unit that is not there wastes more bus time in timeouts
 // than every valid read put together.
+//
+// INV_STARTING is a slot that has never answered and whose startup grace has not
+// run out - including one that could not even be asked yet because its
+// transport is still connecting. It is scheduled like an online slot, so
+// identification keeps trying, but it is not online: nothing has been heard
+// from it, and saying otherwise showed a dongle that never connected as online
+// in Home Assistant for as long as it stayed unreachable.
 enum InvHealth : uint8_t {
   INV_ONLINE = 0,
   INV_STALLED,
   INV_OFFLINE,
+  INV_STARTING,
 };
 
 // Cheapest possible read, used to find out whether an offline unit is back.
@@ -1103,13 +1111,13 @@ class GrowattInverter : public PollingComponent, public modbus::ModbusClientDevi
   bool ident_incomplete_{false};
   uint32_t ident_retry_at_{0};
   uint8_t ident_runs_{0};
-  uint8_t health_{INV_ONLINE};
+  uint8_t health_{INV_STARTING};
   // The state entity is written on transitions, and the initial value above is
-  // the one a healthy slot settles on, so a unit that comes up and stays up
-  // never produces a transition and its entity stays unknown for the life of
-  // the node. This makes the first evaluation count as one regardless of what
-  // it finds. Set even when no state sensor is configured, so the early return
-  // still short-circuits and the transition logging does not repeat.
+  // the one the first evaluation almost always finds, so without this the entity
+  // would stay unknown until the slot first answered. This makes the first
+  // evaluation count as one regardless of what it finds. Set even when no state
+  // sensor is configured, so the early return still short-circuits and the
+  // transition logging does not repeat.
   bool health_published_{false};
   uint32_t stalled_ms_{10000};
   uint32_t offline_ms_{20000};

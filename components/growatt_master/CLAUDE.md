@@ -615,6 +615,14 @@ list was declared dead before it had been asked twice, and then sat out a full
 `device_offline_probe_interval` for a fault that was never on the wire. Until
 that first request goes out, no verdict is reached at all.
 
+No verdict is not the same as "online", though, and for a while it was published
+as one: a slot whose dongle never connected showed online in Home Assistant
+indefinitely, because it was never asked and so never ran out of grace. That
+window is its own state now, `INV_STARTING`, published as `connecting`. It is
+scheduled like an online slot so identification keeps trying, but
+`is_online()` is false, so the controller does not plan against a unit it has
+never heard from.
+
 The controller stays out of the way while that is happening. `refresh_all_()`
 skips slots that have not finished identifying - there is no setpoint in force
 to reassert, and identification re-applies the rate itself when it completes -

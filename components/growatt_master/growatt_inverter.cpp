@@ -483,6 +483,7 @@ const char *GrowattInverter::health_text() const {
   switch (this->health_) {
     case INV_ONLINE: return "online";
     case INV_STALLED: return "stalled";
+    case INV_STARTING: return "connecting";
     default: return "offline";
   }
 }
@@ -507,8 +508,10 @@ void GrowattInverter::update_health_() {
     // only queues a frame once the bus will take one, and a modbus_tcp hub will
     // not take one until its socket is up - so this state covers the whole
     // period in which the transport is still finding its way to the inverter.
-    // A slot cannot be blamed for silence it was never given a chance to break.
-    h = INV_ONLINE;
+    // A slot cannot be blamed for silence it was never given a chance to break,
+    // but it has not earned "online" either: on a dongle that never connects,
+    // this state lasts indefinitely.
+    h = INV_STARTING;
   } else if (this->last_update_ == 0) {
     // Asked, never answered. The window is measured from the first request that
     // actually left this node rather than from boot, because boot is much
@@ -520,7 +523,7 @@ void GrowattInverter::update_health_() {
     // own. Its own window too, not offline_ms_: coming up cold is a different
     // question from having gone quiet, it is slower, and it happens once.
     h = (now - this->first_send_ms_ > this->startup_grace_ms_) ? INV_OFFLINE
-                                                               : INV_ONLINE;
+                                                               : INV_STARTING;
   } else {
     uint32_t age = (micros() - this->last_update_) / 1000;
     if (age < this->stalled_ms_)
