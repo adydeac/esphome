@@ -952,14 +952,19 @@ void GrowattHub::control_power_() {
       if (!std::isnan(l) && l > 0)
         snprintf(w, sizeof(volts) - (w - volts), " / %.1f Vll", l);
     }
+    // Only where a battery was found, and only once it has been read: SOC is
+    // what decides whether a storage unit can still produce after dark.
+    char soc[16] = "";
+    if (inv->get_has_battery() && !std::isnan(inv->get_battery_soc()))
+      snprintf(soc, sizeof(soc), ", SOC %.0f%%", inv->get_battery_soc());
     char summary[224];
     snprintf(summary, sizeof(summary),
-             "%s, rate %u%% [%u..%u], injecting %.0f W, %s, "
+             "%s, rate %u%% [%u..%u], injecting %.0f W%s, %s, "
              "derating %u (%s), can produce more %s, %+.0f W of room to grow",
              wiring, inv->get_power_percent(),
              inv->get_min_power_rate(), inv->get_max_power_rate(),
              std::isnan(inv->get_grid_power()) ? 0.0f : inv->get_grid_power(),
-             volts, inv->get_derating_mode(), inv->get_derating_text(),
+             soc, volts, inv->get_derating_mode(), inv->get_derating_text(),
              inv->can_produce_more() ? "yes" : "no",
              this->headroom_up_(inv, err));
     ESP_LOGD(TAG, "  slot %u: %s", (unsigned) i, summary);
